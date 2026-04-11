@@ -2,6 +2,8 @@ use std::ffi::CStr;
 use openxr as xr;
 
 use crate::renderer::Renderer;
+use crate::video::texture::VideoTexture;
+use crate::video_renderer::VideoRenderer;
 
 // ── format helpers ────────────────────────────────────────────────────────────
 
@@ -472,7 +474,11 @@ impl VrContext {
         self.running
     }
 
-    pub fn render_frame(&mut self, renderer: &Renderer) {
+    pub fn render_frame(
+        &mut self,
+        renderer: &Renderer,
+        video: Option<(&VideoRenderer, &VideoTexture)>,
+    ) {
         if !self.poll_events() {
             return;
         }
@@ -520,11 +526,16 @@ impl VrContext {
             let img_idx = self.eyes[eye].swapchain.acquire_image().unwrap() as usize;
             self.eyes[eye].swapchain.wait_image(xr::Duration::INFINITE).unwrap();
             let tex_view = self.eyes[eye].textures[img_idx].create_view(&Default::default());
-            renderer.render_xr_eye(
-                &tex_view,
-                fov_to_projection(views[eye].fov, 0.1, 100.0),
-                pose_to_view(views[eye].pose),
-            );
+
+            let proj = fov_to_projection(views[eye].fov, 0.1, 100.0);
+            let view_mat = pose_to_view(views[eye].pose);
+
+            if let Some((vr_rend, _)) = video {
+                vr_rend.render_eye(&tex_view, proj, view_mat, &renderer.device, &renderer.queue);
+            } else {
+                renderer.render_xr_eye(&tex_view, proj, view_mat);
+            }
+
             self.eyes[eye].swapchain.release_image().unwrap();
         }
 
