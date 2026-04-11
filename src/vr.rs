@@ -2,6 +2,7 @@ use std::ffi::CStr;
 use openxr as xr;
 
 use crate::renderer::Renderer;
+use crate::ui::panel::PanelRenderer;
 use crate::video::texture::VideoTexture;
 use crate::video_renderer::VideoRenderer;
 
@@ -478,6 +479,7 @@ impl VrContext {
         &mut self,
         renderer: &Renderer,
         video: Option<(&VideoRenderer, &VideoTexture)>,
+        panel: Option<&PanelRenderer>,
     ) {
         if !self.poll_events() {
             return;
@@ -534,6 +536,10 @@ impl VrContext {
                 vr_rend.render_eye(&tex_view, proj, view_mat, &renderer.device, &renderer.queue);
             } else {
                 renderer.render_xr_eye(&tex_view, proj, view_mat);
+            }
+
+            if let Some(panel) = panel {
+                panel.render_eye(&tex_view, proj, view_mat, &renderer.device, &renderer.queue);
             }
 
             self.eyes[eye].swapchain.release_image().unwrap();

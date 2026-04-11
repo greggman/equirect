@@ -127,7 +127,7 @@ impl VideoRenderer {
         let pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[&camera_bgl, &texture_bgl],
+                bind_group_layouts: &[Some(&camera_bgl), Some(&texture_bgl)],
                 immediate_size: 0,
             });
 

@@ -53,10 +53,10 @@ impl Renderer {
         let size = window.inner_size();
 
         // Force Vulkan so wgpu and OpenXR share the same backend.
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             flags: wgpu::InstanceFlags::empty(),
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let surface = instance.create_surface(Arc::clone(&window)).unwrap();
 
@@ -85,14 +85,17 @@ impl Renderer {
             let hal_device = unsafe {
                 hal_adapter.open_with_callback(
                     wgpu::Features::empty(),
+                    &wgpu::Limits::default(),
                     &wgpu::MemoryHints::default(),
-                    Some(Box::new(move |args| {
-                        for &ext in &extra {
-                            if !args.extensions.contains(&ext) {
-                                args.extensions.push(ext);
+                    Some(Box::new(
+                        move |args: wgpu::hal::vulkan::CreateDeviceCallbackArgs<'_, '_, '_>| {
+                            for &ext in &extra {
+                                if !args.extensions.contains(&ext) {
+                                    args.extensions.push(ext);
+                                }
                             }
-                        }
-                    })),
+                        },
+                    )),
                 )
             }
             .expect("Failed to create Vulkan device with XR extensions");
@@ -178,7 +181,7 @@ impl Renderer {
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[camera_bgl],
+            bind_group_layouts: &[Some(camera_bgl)],
             immediate_size: 0,
         });
 
@@ -229,12 +232,19 @@ impl Renderer {
         }
     }
 
-    pub fn render(&self) -> Result<(), wgpu::SurfaceError> {
-        let output = self.surface.get_current_texture()?;
-        let view = output.texture.create_view(&Default::default());
-        self.draw_to_view(&view, &self.pipeline);
-        output.present();
-        Ok(())
+    /// Returns `false` when the surface is lost/outdated and needs to be reconfigured.
+    pub fn render(&self) -> bool {
+        match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(output)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(output) => {
+                let view = output.texture.create_view(&Default::default());
+                self.draw_to_view(&view, &self.pipeline);
+                output.present();
+                true
+            }
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => false,
+            _ => true, // Timeout / Occluded — skip frame but don't reconfigure
+        }
     }
 
     /// Render one XR eye to the provided texture view with the given per-eye matrices.

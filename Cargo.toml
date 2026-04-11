@@ -4,10 +4,20 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1"
 ash = "0.38"
 bytemuck = { version = "1", features = ["derive"] }
+egui = "0.34.1"
+egui-wgpu = "0.34.1"
 glam = "0.32.1"
 openxr = { version = "0.21.1", features = ["static"] }
 pollster = "0.4"
-wgpu = "28.0.0"
+wgpu = "29"
 winit = "0.30.13"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }

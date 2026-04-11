@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,6 +17,8 @@ pub struct VideoFrame {
 /// The latest decoded frame (always BGRA) is available via `take_frame()`.
 pub struct VideoDecoder {
     latest: Arc<Mutex<Option<VideoFrame>>>,
+    /// Current presentation timestamp in microseconds, updated by the decode thread.
+    pub current_pts_us: Arc<AtomicU64>,
     pub width: u32,
     pub height: u32,
     _thread: thread::JoinHandle<()>,
@@ -26,16 +29,18 @@ impl VideoDecoder {
         let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(u32, u32)>>();
         let latest: Arc<Mutex<Option<VideoFrame>>> = Arc::new(Mutex::new(None));
         let latest_clone = Arc::clone(&latest);
+        let current_pts_us = Arc::new(AtomicU64::new(0));
+        let pts_clone = Arc::clone(&current_pts_us);
 
         let handle = thread::Builder::new()
             .name("video-decode".into())
-            .spawn(move || decode_thread(path, init_tx, latest_clone))?;
+            .spawn(move || decode_thread(path, init_tx, latest_clone, pts_clone))?;
 
         let (width, height) = init_rx
             .recv()
             .map_err(|_| anyhow!("Decoder thread exited before sending init result"))??;
 
-        Ok(Self { latest, width, height, _thread: handle })
+        Ok(Self { latest, current_pts_us, width, height, _thread: handle })
     }
 
     /// Take the latest decoded frame, leaving the slot empty.
@@ -51,6 +56,7 @@ fn decode_thread(
     path: PathBuf,
     init_tx: std::sync::mpsc::Sender<Result<(u32, u32)>>,
     latest: Arc<Mutex<Option<VideoFrame>>>,
+    current_pts_us: Arc<AtomicU64>,
 ) {
     use windows::Win32::Media::MediaFoundation::*;
     use windows::Win32::System::Com::*;
@@ -68,7 +74,7 @@ fn decode_thread(
             return;
         }
 
-        match open_and_decode(path, init_tx, &latest) {
+        match open_and_decode(path, init_tx, &latest, &current_pts_us) {
             Ok(()) => {}
             Err(e) => eprintln!("Video decoder error: {e}"),
         }
@@ -91,6 +97,7 @@ fn open_and_decode(
     path: PathBuf,
     init_tx: std::sync::mpsc::Sender<Result<(u32, u32)>>,
     latest: &Arc<Mutex<Option<VideoFrame>>>,
+    current_pts_us: &Arc<AtomicU64>,
 ) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Media::MediaFoundation::*;
@@ -183,6 +190,9 @@ fn open_and_decode(
         };
 
         // PTS-based pacing so the video plays at the right speed.
+        // MF timestamps are in 100-nanosecond units; convert to microseconds.
+        current_pts_us.store((timestamp / 10) as u64, Ordering::Relaxed);
+
         match wall_start {
             None => {
                 wall_start = Some(Instant::now());

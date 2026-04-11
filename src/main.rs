@@ -1,5 +1,6 @@
 mod app;
 mod renderer;
+mod ui;
 mod video;
 mod video_renderer;
 mod vr;
