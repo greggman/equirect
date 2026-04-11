@@ -554,6 +554,19 @@ impl VrContext {
             _ => ControlBarActions::default(),
         };
 
+        // Compute where each controller ray hits the panel (for beam truncation).
+        let pointer_hits: [Option<glam::Vec3>; 2] = {
+            let mut h = [None, None];
+            if let Some(p) = panel.as_deref() {
+                for (i, ctrl) in controllers.iter().enumerate() {
+                    if let Some(ctrl) = ctrl {
+                        h[i] = p.hit_test_3d(ctrl.ray_origin, ctrl.ray_dir);
+                    }
+                }
+            }
+            h
+        };
+
         for eye in 0..2 {
             let img_idx = self.eyes[eye].swapchain.acquire_image().unwrap() as usize;
             self.eyes[eye].swapchain.wait_image(xr::Duration::INFINITE).unwrap();
@@ -573,7 +586,7 @@ impl VrContext {
             }
 
             if let Some(ptr) = pointer_renderer {
-                ptr.render_eye(&tex_view, proj, view_mat, &controllers, &renderer.device, &renderer.queue);
+                ptr.render_eye(&tex_view, proj, view_mat, &controllers, &pointer_hits, &renderer.device, &renderer.queue);
             }
 
             self.eyes[eye].swapchain.release_image().unwrap();

@@ -244,9 +244,9 @@ impl PanelRenderer {
         }
     }
 
-    /// Test a world-space ray against the panel quad.
-    /// Returns the egui pixel coordinate of the intersection, or `None` if no hit.
-    pub fn hit_test(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<egui::Pos2> {
+    /// Internal: test a world-space ray against the panel plane.
+    /// Returns `(t, hit_point)` if the ray hits the quad, `None` otherwise.
+    fn intersect(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<(f32, Vec3)> {
         // Panel is in the plane z = panel_center.z, facing +Z toward the viewer.
         if ray_dir.z.abs() < 1e-6 {
             return None; // ray parallel to panel
@@ -261,8 +261,21 @@ impl PanelRenderer {
         if dx.abs() > self.panel_hw || dy.abs() > self.panel_hh {
             return None; // outside the quad
         }
+        Some((t, hit))
+    }
+
+    /// Returns the 3-D world-space hit point on the panel, or `None`.
+    pub fn hit_test_3d(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<Vec3> {
+        self.intersect(ray_origin, ray_dir).map(|(_, p)| p)
+    }
+
+    /// Returns the egui pixel coordinate of the intersection, or `None`.
+    pub fn hit_test(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<egui::Pos2> {
+        let (_, hit) = self.intersect(ray_origin, ray_dir)?;
+        let dx = hit.x - self.panel_center.x;
+        let dy = hit.y - self.panel_center.y;
         let u = (dx + self.panel_hw) / (self.panel_hw * 2.0);
-        let v = 1.0 - (dy + self.panel_hh) / (self.panel_hh * 2.0); // flip Y for screen coords
+        let v = 1.0 - (dy + self.panel_hh) / (self.panel_hh * 2.0);
         Some(egui::Pos2 {
             x: u * self.pixel_width as f32,
             y: v * self.pixel_height as f32,
