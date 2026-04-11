@@ -1,7 +1,10 @@
 use std::ffi::CStr;
 use openxr as xr;
 
+use crate::input::{ControllerState, XrInput};
+use crate::pointer_renderer::PointerRenderer;
 use crate::renderer::Renderer;
+use crate::ui::control_bar::{ControlBarActions, ControlBarState};
 use crate::ui::panel::PanelRenderer;
 use crate::video::texture::VideoTexture;
 use crate::video_renderer::VideoRenderer;
@@ -226,10 +229,15 @@ pub struct VrContext {
     running: bool,
     pub should_quit: bool,
     frame_count: u64,
+    // Input — NOT ManuallyDrop; dropped explicitly in Drop before the session.
+    xr_input: Option<XrInput>,
 }
 
 impl Drop for VrContext {
     fn drop(&mut self) {
+        // Drop action spaces before the session they belong to.
+        self.xr_input = None;
+
         // SAFETY: every ManuallyDrop field is handled exactly once here.
         unsafe {
             // Drop the wgpu texture wrappers first while the Vulkan device is alive.
@@ -415,6 +423,9 @@ impl VrContext {
 
         println!("XR: ready — waiting for headset");
 
+        // Input actions — set up now so bindings are registered before session starts.
+        let xr_input = XrInput::new(&xr_instance, &session);
+
         Some(VrContext {
             instance: std::mem::ManuallyDrop::new(xr_instance),
             session: std::mem::ManuallyDrop::new(session),
@@ -431,6 +442,7 @@ impl VrContext {
             running: false,
             should_quit: false,
             frame_count: 0,
+            xr_input,
         })
     }
 
@@ -477,25 +489,27 @@ impl VrContext {
 
     pub fn render_frame(
         &mut self,
-        renderer: &Renderer,
-        video: Option<(&VideoRenderer, &VideoTexture)>,
-        panel: Option<&PanelRenderer>,
-    ) {
+        renderer:         &Renderer,
+        video:            Option<(&VideoRenderer, &VideoTexture)>,
+        mut panel:        Option<&mut PanelRenderer>,
+        panel_state:      Option<&ControlBarState>,
+        pointer_renderer: Option<&PointerRenderer>,
+    ) -> ControlBarActions {
         if !self.poll_events() {
-            return;
+            return ControlBarActions::default();
         }
 
         let frame_state = match self.frame_waiter.wait() {
             Ok(fs) => fs,
             Err(e) => {
                 eprintln!("XR: frame_waiter.wait failed: {e}");
-                return;
+                return ControlBarActions::default();
             }
         };
 
         if let Err(e) = self.frame_stream.begin() {
             eprintln!("XR: frame_stream.begin failed: {e}");
-            return;
+            return ControlBarActions::default();
         }
 
         if !frame_state.should_render {
@@ -503,8 +517,16 @@ impl VrContext {
                 .end(frame_state.predicted_display_time, self.blend_mode, &[])
                 .unwrap_or_else(|e| eprintln!("XR: frame_stream.end (no render) failed: {e}"));
             self.frame_count += 1;
-            return;
+            return ControlBarActions::default();
         }
+
+        // Poll controller input using the frame's predicted display time.
+        let controllers: [Option<ControllerState>; 2] =
+            if let Some(ref input) = self.xr_input {
+                input.poll(&self.session, &self.stage, frame_state.predicted_display_time)
+            } else {
+                [None, None]
+            };
 
         if self.frame_count == 0 {
             println!("XR: first rendered frame");
@@ -520,8 +542,16 @@ impl VrContext {
                 self.frame_stream
                     .end(frame_state.predicted_display_time, self.blend_mode, &[])
                     .ok();
-                return;
+                return ControlBarActions::default();
             }
+        };
+
+        // Update the panel egui texture once (shared by both eyes).
+        let actions = match (panel.as_deref_mut(), panel_state) {
+            (Some(p), Some(s)) => {
+                p.update(&renderer.device, &renderer.queue, s, &controllers)
+            }
+            _ => ControlBarActions::default(),
         };
 
         for eye in 0..2 {
@@ -529,7 +559,7 @@ impl VrContext {
             self.eyes[eye].swapchain.wait_image(xr::Duration::INFINITE).unwrap();
             let tex_view = self.eyes[eye].textures[img_idx].create_view(&Default::default());
 
-            let proj = fov_to_projection(views[eye].fov, 0.1, 100.0);
+            let proj     = fov_to_projection(views[eye].fov, 0.1, 100.0);
             let view_mat = pose_to_view(views[eye].pose);
 
             if let Some((vr_rend, _)) = video {
@@ -538,8 +568,12 @@ impl VrContext {
                 renderer.render_xr_eye(&tex_view, proj, view_mat);
             }
 
-            if let Some(panel) = panel {
-                panel.render_eye(&tex_view, proj, view_mat, &renderer.device, &renderer.queue);
+            if let Some(p) = panel.as_deref() {
+                p.render_eye(&tex_view, proj, view_mat, &renderer.device, &renderer.queue);
+            }
+
+            if let Some(ptr) = pointer_renderer {
+                ptr.render_eye(&tex_view, proj, view_mat, &controllers, &renderer.device, &renderer.queue);
             }
 
             self.eyes[eye].swapchain.release_image().unwrap();
@@ -585,5 +619,6 @@ impl VrContext {
             .unwrap_or_else(|e| eprintln!("XR: frame_stream.end failed: {e}"));
 
         self.frame_count += 1;
+        actions
     }
 }

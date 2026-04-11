@@ -8,6 +8,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
+use crate::pointer_renderer::PointerRenderer;
 use crate::renderer::Renderer;
 use crate::ui::control_bar::ControlBarState;
 use crate::ui::panel::PanelRenderer;
@@ -25,6 +26,7 @@ pub struct App {
     video_texture: Option<VideoTexture>,
     video_renderer: Option<VideoRenderer>,
     panel_renderer: Option<PanelRenderer>,
+    pointer_renderer: Option<PointerRenderer>,
     control_bar_state: ControlBarState,
     video_path: Option<PathBuf>,
 }
@@ -38,6 +40,7 @@ impl App {
             video_texture: None,
             video_renderer: None,
             panel_renderer: None,
+            pointer_renderer: None,
             control_bar_state: ControlBarState::default(),
             video_path,
         }
@@ -109,6 +112,8 @@ impl ApplicationHandler for App {
             0.2,
         ));
 
+        self.pointer_renderer = Some(PointerRenderer::new(&renderer.device, target_fmt));
+
         self.renderer = Some(renderer);
         self.vr = vr;
     }
@@ -155,11 +160,6 @@ impl ApplicationHandler for App {
             self.control_bar_state.current_secs = pts_us as f64 / 1_000_000.0;
         }
 
-        // Render the control bar UI to the offscreen panel texture.
-        if let Some(panel) = &mut self.panel_renderer {
-            panel.update(&renderer.device, &renderer.queue, &self.control_bar_state);
-        }
-
         if let Some(vr) = &mut self.vr {
             if vr.should_quit {
                 renderer
@@ -171,7 +171,21 @@ impl ApplicationHandler for App {
             }
 
             let video = self.video_renderer.as_ref().zip(self.video_texture.as_ref());
-            vr.render_frame(renderer, video, self.panel_renderer.as_ref());
+            let actions = vr.render_frame(
+                renderer,
+                video,
+                self.panel_renderer.as_mut(),
+                Some(&self.control_bar_state),
+                self.pointer_renderer.as_ref(),
+            );
+
+            // Handle control bar actions.
+            if actions.play_pause {
+                self.control_bar_state.is_playing = !self.control_bar_state.is_playing;
+            }
+            if actions.exit {
+                vr.request_exit();
+            }
         }
 
         renderer.window().request_redraw();

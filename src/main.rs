@@ -1,4 +1,6 @@
 mod app;
+mod input;
+mod pointer_renderer;
 mod renderer;
 mod ui;
 mod video;

@@ -2,7 +2,8 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
-use super::control_bar::{ControlBarState, draw};
+use crate::input::ControllerState;
+use super::control_bar::{ControlBarActions, ControlBarState, draw};
 
 // ── GPU types (identical to video_renderer) ────────────────────────────────
 
@@ -52,6 +53,13 @@ pub struct PanelRenderer {
     sampler: wgpu::Sampler,
     vertex_buffer: wgpu::Buffer,
     offscreen_texture: wgpu::Texture, // kept alive alongside bind group
+    // hit-testing geometry (panel is always axis-aligned in stage space)
+    panel_center: Vec3,
+    panel_hw: f32,   // half-width  in metres
+    panel_hh: f32,   // half-height in metres
+    // pointer interaction state
+    cursor_pos:    Option<egui::Pos2>,
+    prev_clicking: bool,
 }
 
 impl PanelRenderer {
@@ -228,19 +236,105 @@ impl PanelRenderer {
             sampler,
             vertex_buffer,
             offscreen_texture,
+            panel_center: center,
+            panel_hw: width_m / 2.0,
+            panel_hh: height_m / 2.0,
+            cursor_pos: None,
+            prev_clicking: false,
         }
+    }
+
+    /// Test a world-space ray against the panel quad.
+    /// Returns the egui pixel coordinate of the intersection, or `None` if no hit.
+    pub fn hit_test(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<egui::Pos2> {
+        // Panel is in the plane z = panel_center.z, facing +Z toward the viewer.
+        if ray_dir.z.abs() < 1e-6 {
+            return None; // ray parallel to panel
+        }
+        let t = (self.panel_center.z - ray_origin.z) / ray_dir.z;
+        if t <= 0.001 {
+            return None; // panel is behind or at the controller
+        }
+        let hit = ray_origin + ray_dir * t;
+        let dx = hit.x - self.panel_center.x;
+        let dy = hit.y - self.panel_center.y;
+        if dx.abs() > self.panel_hw || dy.abs() > self.panel_hh {
+            return None; // outside the quad
+        }
+        let u = (dx + self.panel_hw) / (self.panel_hw * 2.0);
+        let v = 1.0 - (dy + self.panel_hh) / (self.panel_hh * 2.0); // flip Y for screen coords
+        Some(egui::Pos2 {
+            x: u * self.pixel_width as f32,
+            y: v * self.pixel_height as f32,
+        })
     }
 
     /// Run the egui control bar and render the result to the offscreen texture.
     /// Call once per VR frame before any `render_eye` calls.
-    pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, state: &ControlBarState) {
+    /// Returns any actions the user triggered via the pointer.
+    pub fn update(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        state: &ControlBarState,
+        controllers: &[Option<ControllerState>; 2],
+    ) -> ControlBarActions {
+        // ── Build pointer events from controller hit-tests ─────────────────
+        let mut events: Vec<egui::Event> = Vec::new();
+        let mut new_pos: Option<egui::Pos2> = None;
+        let mut new_clicking = false;
+
+        for ctrl in controllers.iter().flatten() {
+            if let Some(hit) = self.hit_test(ctrl.ray_origin, ctrl.ray_dir) {
+                new_pos = Some(hit);
+                new_clicking = ctrl.clicking;
+                break; // first hitting controller wins
+            }
+        }
+
+        match (self.cursor_pos, new_pos) {
+            (_, Some(pos)) => {
+                events.push(egui::Event::PointerMoved(pos));
+                // Click press
+                if new_clicking && !self.prev_clicking {
+                    events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+                // Click release
+                if !new_clicking && self.prev_clicking {
+                    events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+            }
+            (Some(_), None) => {
+                // Pointer left the panel.
+                events.push(egui::Event::PointerGone);
+            }
+            (None, None) => {}
+        }
+
+        self.cursor_pos    = new_pos;
+        self.prev_clicking = new_clicking;
+
+        // ── Run egui ────────────────────────────────���──────────────────────
         let raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
                 egui::vec2(self.pixel_width as f32, self.pixel_height as f32),
             )),
+            events,
             ..Default::default()
         };
+
+        let mut actions = ControlBarActions::default();
 
         let full_output = self.egui_ctx.run_ui(raw_input, |ctx| {
             // Dark theme suits VR.
@@ -254,7 +348,7 @@ impl PanelRenderer {
                         .inner_margin(egui::Margin::same(8)),
                 )
                 .show(ctx, |ui| {
-                    draw(ui, state);
+                    actions = draw(ui, state);
                 });
         });
 
@@ -304,6 +398,8 @@ impl PanelRenderer {
         }
 
         queue.submit([encoder.finish()]);
+
+        actions
     }
 
     /// Render the panel quad into one XR eye.  Uses `LoadOp::Load` so the video
