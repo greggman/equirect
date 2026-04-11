@@ -1,5 +1,6 @@
 mod app;
 mod renderer;
+mod vr;
 
 fn main() {
     let event_loop = winit::event_loop::EventLoop::new().expect("Failed to create event loop");

@@ -3,12 +3,11 @@ name = "vrust-v"
 version = "0.1.0"
 edition = "2024"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
+ash = "0.38"
 bytemuck = { version = "1", features = ["derive"] }
-pollster = "0.4"
 glam = "0.32.1"
-openvr = "0.8.1"
+openxr = { version = "0.21.1", features = ["static"] }
+pollster = "0.4"
 wgpu = "28.0.0"
 winit = "0.30.13"
