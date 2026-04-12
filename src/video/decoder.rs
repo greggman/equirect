@@ -13,8 +13,6 @@ const SPEEDS: [f32; 5] = [1.0, 2.0 / 3.0, 0.5, 1.0 / 3.0, 0.25];
 #[derive(Clone)]
 pub struct VideoFrame {
     pub data: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
 }
 
 /// Opens a video file and decodes it on a background thread via Windows Media Foundation.
@@ -444,7 +442,7 @@ fn open_and_decode(
             }
         };
 
-        *latest.lock().unwrap() = Some(VideoFrame { data: bgra, width, height });
+        *latest.lock().unwrap() = Some(VideoFrame { data: bgra });
     }
 
     Ok(())
@@ -600,35 +598,6 @@ fn lock_contiguous(
     }
 }
 
-// ── software colour-space conversions ─────────────────────────────────────
-
-fn nv12_to_bgra(src: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let mut dst = vec![0u8; w * h * 4];
-    let y_plane  = &src[..w * h];
-    let uv_plane = &src[w * h..];
-
-    for row in 0..h {
-        for col in 0..w {
-            let y  = y_plane[row * w + col] as i32 - 16;
-            let ui = (row / 2) * w + (col & !1);
-            let u  = uv_plane[ui]     as i32 - 128;
-            let v  = uv_plane[ui + 1] as i32 - 128;
-
-            let c = 298 * y;
-            let r = ((c           + 409 * v + 128) >> 8).clamp(0, 255) as u8;
-            let g = ((c - 100 * u - 208 * v + 128) >> 8).clamp(0, 255) as u8;
-            let b = ((c + 516 * u           + 128) >> 8).clamp(0, 255) as u8;
-
-            let i = (row * w + col) * 4;
-            dst[i]     = b;
-            dst[i + 1] = g;
-            dst[i + 2] = r;
-            dst[i + 3] = 255;
-        }
-    }
-    dst
-}
-
 // ── audio decode thread ───────────────────────────────────────────────────
 
 fn audio_decode_thread(
@@ -668,10 +637,10 @@ fn open_and_decode_audio(
     path: PathBuf,
     format_tx: &std::sync::mpsc::Sender<Option<(u32, u16)>>,
     producer: &std::sync::mpsc::SyncSender<f32>,
-    paused: &Arc<AtomicBool>,
-    speed_index: &Arc<AtomicU32>,
+    _paused: &Arc<AtomicBool>,
+    _speed_index: &Arc<AtomicU32>,
     audio_seek: &Arc<AtomicU64>,
-    audio_flush_gen: &Arc<AtomicU64>,
+    _audio_flush_gen: &Arc<AtomicU64>,
 ) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Media::MediaFoundation::*;

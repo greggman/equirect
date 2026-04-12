@@ -52,9 +52,12 @@ pub struct PanelRenderer {
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     texture_bind_group: wgpu::BindGroup,
+    #[allow(dead_code)]
     texture_bgl: wgpu::BindGroupLayout,
+    #[allow(dead_code)]
     sampler: wgpu::Sampler,
     vertex_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
     offscreen_texture: wgpu::Texture, // kept alive alongside bind group
     // hit-testing geometry (panel is always axis-aligned in stage space)
     panel_center: Vec3,

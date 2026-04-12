@@ -22,12 +22,6 @@ impl CameraUniform {
         }
     }
 
-    fn from_matrices(projection: glam::Mat4, view: glam::Mat4) -> Self {
-        Self {
-            projection: projection.to_cols_array_2d(),
-            view: view.to_cols_array_2d(),
-        }
-    }
 }
 
 pub struct Renderer {
@@ -246,22 +240,6 @@ impl Renderer {
             wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => false,
             _ => true, // Timeout / Occluded — skip frame but don't reconfigure
         }
-    }
-
-    /// Render one XR eye to the provided texture view with the given per-eye matrices.
-    pub fn render_xr_eye(
-        &self,
-        target: &wgpu::TextureView,
-        projection: glam::Mat4,
-        view_matrix: glam::Mat4,
-    ) {
-        let cam = CameraUniform::from_matrices(projection, view_matrix);
-        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&cam));
-
-        let pipeline = self.xr_pipeline.as_ref().unwrap_or(&self.pipeline);
-        self.draw_to_view(target, pipeline);
-        // Wait for the GPU to finish before the caller releases the swapchain image.
-        self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
     }
 
     fn draw_to_view(&self, target: &wgpu::TextureView, pipeline: &wgpu::RenderPipeline) {

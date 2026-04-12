@@ -157,7 +157,6 @@ pub struct VideoSwapchain {
     textures: Vec<wgpu::Texture>,
     pub width:  u32,
     pub height: u32,
-    pub format: wgpu::TextureFormat,
     blit: VideoBlit,
 }
 
@@ -206,7 +205,6 @@ impl VideoSwapchain {
             textures,
             width,
             height,
-            format,
             blit,
         })
     }
@@ -301,14 +299,6 @@ pub fn image_rect(
         StereoLayout::BT => if eye == 0 { (0, h as i32/2, w, h/2) } else { (0, 0, w, h/2) },
     };
     (ox as i32, oy as i32, ew as i32, eh as i32)
-}
-
-/// World-space pose facing the user (quad/cylinder centre at z = -dist_m, y = eye_height_m).
-pub fn forward_pose(dist_m: f32, eye_height_m: f32) -> xr::Posef {
-    xr::Posef {
-        position:    xr::Vector3f    { x: 0.0, y: eye_height_m, z: -dist_m },
-        orientation: xr::Quaternionf { x: 0.0, y: 0.0, z: 0.0, w: 1.0 },
-    }
 }
 
 /// Apply zoom to equirect angles: zoom=1 → full range, zoom=2 → half range.

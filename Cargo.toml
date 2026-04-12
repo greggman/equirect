@@ -3,6 +3,9 @@ name = "vrust-v"
 version = "0.1.0"
 edition = "2024"
 
+[lints.rust]
+warnings = "deny"
+
 [dependencies]
 anyhow = "1"
 ash = "0.38"

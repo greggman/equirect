@@ -23,6 +23,7 @@ pub struct ControllerState {
 /// Manages OpenXR action sets for both hand controllers.
 pub struct XrInput {
     pub action_set:     xr::ActionSet,
+    #[allow(dead_code)]
     pose_action:        xr::Action<xr::Posef>,
     click_action:       xr::Action<bool>,
     thumbstick_action:  xr::Action<xr::Vector2f>,
