@@ -2,6 +2,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
 use wgpu::util::DeviceExt;
 
+use crate::ui::settings::{Projection, StereoLayout, VideoMode, VideoSettings};
 use crate::video::texture::VideoTexture;
 
 // ── GPU types ──────────────────────────────────────────────────────────────
@@ -11,6 +12,57 @@ use crate::video::texture::VideoTexture;
 struct CameraUniform {
     projection: [[f32; 4]; 4],
     view: [[f32; 4]; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+struct VideoParams {
+    uv_offset: [f32; 2],
+    uv_scale:  [f32; 2],
+    mode:      u32,
+    inv_zoom:  f32,
+    _pad:      [u32; 2],
+}
+
+impl VideoParams {
+    fn from_settings(settings: &VideoSettings, eye: usize) -> Self {
+        let zoom = settings.zoom.max(0.1);
+        let inv_zoom = 1.0 / zoom;
+        let mode = match (settings.proj, settings.mode) {
+            (Projection::Fisheye,  VideoMode::View180) => 1,
+            (Projection::Fisheye,  VideoMode::View360) => 2,
+            (Projection::Equirect, VideoMode::View180) => 3,
+            (Projection::Equirect, VideoMode::View360) => 4,
+            _ => 0,
+        };
+        // Stereo UV crop: select which half of the video this eye should see.
+        let (uv_offset, uv_scale) = match settings.stereo {
+            StereoLayout::OneView => ([0.0_f32, 0.0], [1.0_f32, 1.0]),
+            StereoLayout::LR => {
+                if eye == 0 { ([0.0, 0.0], [0.5, 1.0]) }
+                else        { ([0.5, 0.0], [0.5, 1.0]) }
+            },
+            StereoLayout::RL => {
+                if eye == 0 { ([0.5, 0.0], [0.5, 1.0]) }
+                else        { ([0.0, 0.0], [0.5, 1.0]) }
+            },
+            StereoLayout::TB => {
+                if eye == 0 { ([0.0, 0.0], [1.0, 0.5]) }
+                else        { ([0.0, 0.5], [1.0, 0.5]) }
+            },
+            StereoLayout::BT => {
+                if eye == 0 { ([0.0, 0.5], [1.0, 0.5]) }
+                else        { ([0.0, 0.0], [1.0, 0.5]) }
+            },
+        };
+        Self {
+            uv_offset,
+            uv_scale,
+            mode,
+            inv_zoom,
+            _pad: [0; 2],
+        }
+    }
 }
 
 #[repr(C)]
@@ -42,13 +94,16 @@ fn build_quad(aspect: f32) -> [Vertex; 6] {
 // ── VideoRenderer ──────────────────────────────────────────────────────────
 
 pub struct VideoRenderer {
-    pipeline: wgpu::RenderPipeline,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
-    texture_bgl: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
-    vertex_buffer: wgpu::Buffer,
+    pipeline:           wgpu::RenderPipeline, // flat quad / fisheye (vertex buffer)
+    equirect_pipeline:  wgpu::RenderPipeline, // fullscreen triangle, no vertex buffer
+    camera_buffer:      wgpu::Buffer,
+    camera_bind_group:  wgpu::BindGroup,
+    texture_bgl:        wgpu::BindGroupLayout,
+    sampler:            wgpu::Sampler,
+    vertex_buffer:      wgpu::Buffer,
     texture_bind_group: Option<wgpu::BindGroup>,
+    params_buffer:      wgpu::Buffer,
+    params_bind_group:  wgpu::BindGroup,
 }
 
 impl VideoRenderer {
@@ -66,7 +121,7 @@ impl VideoRenderer {
             label: Some("vr_camera_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -126,14 +181,47 @@ impl VideoRenderer {
             ..Default::default()
         });
 
-        // ── pipeline ──────────────────────────────────────────────────────
+        // ── video params bind group layout (group 2) ──────────────────────
+        let params_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vr_params_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let default_params = VideoParams {
+            uv_offset: [0.0, 0.0], uv_scale: [1.0, 1.0], mode: 0, inv_zoom: 1.0, _pad: [0; 2],
+        };
+        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vr_params_buf"),
+            contents: bytemuck::bytes_of(&default_params),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let params_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vr_params_bg"),
+            layout: &params_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: params_buffer.as_entire_binding(),
+            }],
+        });
+
+        // ── pipelines ─────────────────────────────────────────────────────
         let pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[Some(&camera_bgl), Some(&texture_bgl)],
+                bind_group_layouts: &[Some(&camera_bgl), Some(&texture_bgl), Some(&params_bgl)],
                 immediate_size: 0,
             });
 
+        // Flat/fisheye pipeline: uses a vertex buffer with position + uv.
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("video_quad_pipeline"),
             layout: Some(&pipeline_layout),
@@ -164,6 +252,35 @@ impl VideoRenderer {
             cache: None,
         });
 
+        // Equirect pipeline: fullscreen triangle, no vertex buffer.
+        // The vertex shader (vs_equirect) generates positions from vertex_index
+        // and passes clip-space xy as uv for ray-direction reconstruction.
+        let equirect_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("video_equirect_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_equirect"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         // ── quad vertex buffer ────────────────────────────────────────────
         let aspect = video_width as f32 / video_height.max(1) as f32;
         let verts = build_quad(aspect);
@@ -175,18 +292,20 @@ impl VideoRenderer {
 
         Self {
             pipeline,
+            equirect_pipeline,
             camera_buffer,
             camera_bind_group,
             texture_bgl,
             sampler,
             vertex_buffer,
             texture_bind_group: None,
+            params_buffer,
+            params_bind_group,
         }
     }
 
     /// Call once (and whenever the video texture is recreated) to update the
-    /// sampler binding.  The bind group borrows the view via wgpu's refcounting
-    /// so the texture must remain alive as long as this bind group exists.
+    /// sampler binding.
     pub fn set_texture(&mut self, device: &wgpu::Device, texture: &VideoTexture) {
         self.texture_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vr_texture_bg"),
@@ -210,16 +329,27 @@ impl VideoRenderer {
         target: &wgpu::TextureView,
         projection: Mat4,
         view: Mat4,
+        settings: &VideoSettings,
+        eye: usize,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) {
         let Some(tex_bg) = &self.texture_bind_group else { return };
+
+        // All direction-based modes (fisheye + equirect) use the fullscreen-triangle pipeline.
+        let use_direction_shader = matches!(
+            settings.mode,
+            VideoMode::View180 | VideoMode::View360
+        );
 
         let cam = CameraUniform {
             projection: projection.to_cols_array_2d(),
             view: view.to_cols_array_2d(),
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&cam));
+
+        let params = VideoParams::from_settings(settings, eye);
+        queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
 
         let mut encoder = device.create_command_encoder(&Default::default());
         {
@@ -237,11 +367,21 @@ impl VideoRenderer {
                 ..Default::default()
             });
 
-            pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, tex_bg, &[]);
-            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            pass.draw(0..6, 0..1);
+            pass.set_bind_group(2, &self.params_bind_group, &[]);
+
+            if use_direction_shader {
+                // Fullscreen triangle — no vertex buffer needed.
+                // The fragment shader reconstructs ray directions from clip-space uv
+                // using the camera projection and view-rotation matrices.
+                pass.set_pipeline(&self.equirect_pipeline);
+                pass.draw(0..3, 0..1);
+            } else {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                pass.draw(0..6, 0..1);
+            }
         }
 
         queue.submit(std::iter::once(encoder.finish()));

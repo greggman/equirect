@@ -247,7 +247,8 @@ fn open_and_decode(
         reader.SetStreamSelection(FIRST_VIDEO, true).ok();
     }
 
-    let frame_size: u64 = unsafe {
+    // Read native dimensions just for the zero-check; real output dims come below.
+    let native_frame_size: u64 = unsafe {
         let native_type: IMFMediaType = reader
             .GetNativeMediaType(FIRST_VIDEO, 0)
             .map_err(|e| anyhow!("GetNativeMediaType failed: {e}"))?;
@@ -255,16 +256,30 @@ fn open_and_decode(
             .GetUINT64(&MF_MT_FRAME_SIZE)
             .map_err(|e| anyhow!("GetUINT64(MF_MT_FRAME_SIZE) failed: {e}"))?
     };
-    let width  = (frame_size >> 32) as u32;
-    let height = (frame_size & 0xFFFF_FFFF) as u32;
-
-    if width == 0 || height == 0 {
+    if native_frame_size == 0
+        || (native_frame_size >> 32) == 0
+        || (native_frame_size & 0xFFFF_FFFF) == 0
+    {
         let _ = init_tx.send(Err(anyhow!("Video has zero-size dimensions")));
         return Ok(());
     }
 
     let fmt = try_set_output_format(&reader, FIRST_VIDEO)?;
-    println!("Video: {width}x{height}, output format: {fmt:?}");
+
+    // After format conversion is configured, query the ACTUAL output dimensions.
+    // These may differ from the native (coded) dimensions because codecs often pad
+    // width/height to alignment boundaries (e.g. H.264 pads height to multiples of 16).
+    let (width, height) = unsafe {
+        let out_type: IMFMediaType = reader
+            .GetCurrentMediaType(FIRST_VIDEO)
+            .map_err(|e| anyhow!("GetCurrentMediaType failed: {e}"))?;
+        let fs = out_type
+            .GetUINT64(&MF_MT_FRAME_SIZE)
+            .map_err(|e| anyhow!("GetUINT64(MF_MT_FRAME_SIZE) output type failed: {e}"))?;
+        ((fs >> 32) as u32, (fs & 0xFFFF_FFFF) as u32)
+    };
+
+    println!("Video: {width}x{height} (output), format: {fmt:?}");
 
     let duration_us = unsafe { query_duration_us(&reader) };
 
@@ -373,13 +388,10 @@ fn open_and_decode(
         // ── pixel format conversion ────────────────────────────────────────
         let bgra = match fmt {
             DecodeFmt::Bgra => extract_bgra_via_2d(&sample, width as usize, height as usize)?,
-            DecodeFmt::Nv12 | DecodeFmt::Yuy2 => {
+            DecodeFmt::Nv12 => extract_nv12_via_2d(&sample, width as usize, height as usize)?,
+            DecodeFmt::Yuy2 => {
                 let raw = lock_contiguous(&sample)?;
-                if fmt == DecodeFmt::Nv12 {
-                    nv12_to_bgra(&raw, width as usize, height as usize)
-                } else {
-                    yuy2_to_bgra(&raw, width as usize, height as usize)
-                }
+                yuy2_to_bgra(&raw, width as usize, height as usize)
             }
         };
 
@@ -462,6 +474,64 @@ fn extract_bgra_via_2d(
     }
 
     Ok(out)
+}
+
+/// Extract an NV12 frame using IMF2DBuffer so we respect the actual row pitch.
+/// Converts to tightly-packed BGRA (width × height × 4 bytes).
+fn extract_nv12_via_2d(
+    sample: &windows::Win32::Media::MediaFoundation::IMFSample,
+    width: usize,
+    height: usize,
+) -> Result<Vec<u8>> {
+    use windows::Win32::Media::MediaFoundation::IMF2DBuffer;
+    use windows::core::Interface as _;
+
+    let buf = unsafe {
+        sample
+            .GetBufferByIndex(0)
+            .map_err(|e| anyhow!("GetBufferByIndex (NV12): {e}"))?
+    };
+
+    let buf2d = buf.cast::<IMF2DBuffer>()
+        .map_err(|e| anyhow!("NV12 buffer is not IMF2DBuffer: {e}"))?;
+
+    let mut scan0: *mut u8 = std::ptr::null_mut();
+    let mut pitch: i32 = 0;
+    unsafe {
+        buf2d.Lock2D(&mut scan0, &mut pitch)
+            .map_err(|e| anyhow!("Lock2D (NV12): {e}"))?;
+    }
+
+    let stride = pitch.unsigned_abs() as usize;
+    let mut dst = vec![0u8; width * height * 4];
+
+    // Y plane: scan0[row * stride + col]
+    // UV plane: scan0[height * stride + (row/2) * stride + col] (interleaved U,V)
+    let uv_offset = height * stride;
+
+    for row in 0..height {
+        for col in 0..width {
+            let y  = unsafe { *scan0.add(row * stride + col) } as i32 - 16;
+            let uv_row = row / 2;
+            let uv_col = col & !1;
+            let u = unsafe { *scan0.add(uv_offset + uv_row * stride + uv_col)     } as i32 - 128;
+            let v = unsafe { *scan0.add(uv_offset + uv_row * stride + uv_col + 1) } as i32 - 128;
+
+            let c = 298 * y;
+            let r = ((c           + 409 * v + 128) >> 8).clamp(0, 255) as u8;
+            let g = ((c - 100 * u - 208 * v + 128) >> 8).clamp(0, 255) as u8;
+            let b = ((c + 516 * u           + 128) >> 8).clamp(0, 255) as u8;
+
+            let i = (row * width + col) * 4;
+            dst[i]     = b;
+            dst[i + 1] = g;
+            dst[i + 2] = r;
+            dst[i + 3] = 255;
+        }
+    }
+
+    unsafe { buf2d.Unlock2D().ok() };
+    Ok(dst)
 }
 
 fn lock_contiguous(

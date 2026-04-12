@@ -9,6 +9,10 @@ use crate::ui::control_bar::{ControlBarActions, ControlBarState};
 use crate::ui::panel::PanelRenderer;
 use crate::ui::settings::{SettingsActions, VideoSettings, draw as settings_draw};
 use crate::video::texture::VideoTexture;
+use crate::video_layer::{
+    VideoSwapchain, EffectiveLayerMode, effective_mode,
+    forward_pose, zoom_angles,
+};
 use crate::video_renderer::VideoRenderer;
 
 // ── format helpers ────────────────────────────────────────────────────────────
@@ -133,9 +137,11 @@ pub struct EyeSwapchain {
 /// Holds the OpenXR instance and system ID before the wgpu device is created.
 /// Used to query required Vulkan device extensions so the renderer can enable them.
 pub struct VrPreInit {
-    instance: xr::Instance,
-    system: xr::SystemId,
-    has_legacy_vulkan: bool,
+    instance:           xr::Instance,
+    system:             xr::SystemId,
+    has_legacy_vulkan:  bool,
+    pub has_cylinder:   bool,
+    pub has_equirect2:  bool,
 }
 
 impl VrPreInit {
@@ -156,10 +162,13 @@ impl VrPreInit {
             return None;
         }
 
-        // Enable both so we can query device extensions via the legacy query function.
+        // Enable both Vulkan bindings so we can query device extensions.
+        // Also enable composition-layer extensions if the runtime supports them.
         let mut enabled = xr::ExtensionSet::default();
         enabled.khr_vulkan_enable2 = true;
         enabled.khr_vulkan_enable = exts.khr_vulkan_enable;
+        enabled.khr_composition_layer_cylinder  = exts.khr_composition_layer_cylinder;
+        enabled.khr_composition_layer_equirect2 = exts.khr_composition_layer_equirect2;
 
         let instance = xr_entry
             .create_instance(
@@ -183,7 +192,13 @@ impl VrPreInit {
 
         println!("XR: HMD found");
 
-        Some(Self { instance, system, has_legacy_vulkan: exts.khr_vulkan_enable })
+        Some(Self {
+            instance,
+            system,
+            has_legacy_vulkan: exts.khr_vulkan_enable,
+            has_cylinder:  exts.khr_composition_layer_cylinder,
+            has_equirect2: exts.khr_composition_layer_equirect2,
+        })
     }
 
     /// Returns the Vulkan device extensions required by the OpenXR runtime.
@@ -226,6 +241,10 @@ pub struct VrContext {
     session: std::mem::ManuallyDrop<xr::Session<xr::Vulkan>>,
     instance: std::mem::ManuallyDrop<xr::Instance>,
     pub swapchain_format: wgpu::TextureFormat,
+    /// Raw Vulkan format integer for the swapchain (needed when creating video swapchain).
+    pub vk_format:        u32,
+    pub has_cylinder:     bool,
+    pub has_equirect2:    bool,
     view_type: xr::ViewConfigurationType,
     blend_mode: xr::EnvironmentBlendMode,
     running: bool,
@@ -280,7 +299,13 @@ impl VrContext {
     /// Complete XR initialisation using a pre-initialised instance/system and
     /// a fully constructed renderer whose Vulkan device has the required extensions.
     pub fn new(renderer: &Renderer, pre: VrPreInit) -> Option<Self> {
-        let VrPreInit { instance: xr_instance, system, .. } = pre;
+        let VrPreInit {
+            instance: xr_instance,
+            system,
+            has_cylinder,
+            has_equirect2,
+            ..
+        } = pre;
 
         // ── extract wgpu's Vulkan handles ─────────────────────────────────────
         let (vk_instance, vk_physical, vk_device, queue_family) = unsafe {
@@ -424,7 +449,7 @@ impl VrContext {
             return None;
         };
 
-        println!("XR: ready — waiting for headset");
+        println!("XR: ready — waiting for headset (cylinder={has_cylinder}, equirect2={has_equirect2})");
 
         // Input actions — set up now so bindings are registered before session starts.
         let xr_input = XrInput::new(&xr_instance, &session);
@@ -440,6 +465,9 @@ impl VrContext {
                 std::mem::ManuallyDrop::new(eye1),
             ],
             swapchain_format: wgpu_fmt,
+            vk_format: xr_vk_fmt,
+            has_cylinder,
+            has_equirect2,
             view_type,
             blend_mode,
             running: false,
@@ -448,6 +476,24 @@ impl VrContext {
             prev_menu_pressed: false,
             xr_input,
         })
+    }
+
+    /// Create an XR swapchain to hold video frames for composition layers.
+    /// Call once per video file; drop before `VrContext` drops.
+    pub fn create_video_swapchain(
+        &self,
+        device: &wgpu::Device,
+        width:  u32,
+        height: u32,
+    ) -> Option<VideoSwapchain> {
+        VideoSwapchain::new(
+            &self.session,
+            device,
+            width,
+            height,
+            self.swapchain_format,
+            self.vk_format,
+        )
     }
 
     /// Ask the runtime to end the session cleanly (FOCUSED → STOPPING → EXITING).
@@ -494,7 +540,10 @@ impl VrContext {
     pub fn render_frame(
         &mut self,
         renderer:         &Renderer,
-        video:            Option<(&VideoRenderer, &VideoTexture)>,
+        // XR composition-layer path (quad / cylinder / equirect2).
+        mut video_layer:  Option<(&mut VideoSwapchain, &VideoSettings)>,
+        // Shader fallback for fisheye (or when no video swapchain exists yet).
+        video_shader:     Option<(&VideoRenderer, &VideoTexture, &VideoSettings)>,
         mut panel:        Option<(&mut PanelRenderer, &ControlBarState)>,
         mut browser:      Option<(&mut PanelRenderer, &mut BrowserState)>,
         mut settings:     Option<(&mut PanelRenderer, &mut VideoSettings)>,
@@ -598,6 +647,13 @@ impl VrContext {
             h
         };
 
+        // ── XR layer video: blit once per frame (not per eye) ────────────────
+        // When using composition layers, the runtime handles per-eye projection.
+        if let Some((sc, _vs)) = &mut video_layer {
+            sc.update(&renderer.device, &renderer.queue);
+        }
+
+        // ── per-eye render (panels + pointer + fisheye shader fallback) ───────
         for eye in 0..2 {
             let img_idx = self.eyes[eye].swapchain.acquire_image().unwrap() as usize;
             self.eyes[eye].swapchain.wait_image(xr::Duration::INFINITE).unwrap();
@@ -606,24 +662,23 @@ impl VrContext {
             let proj     = fov_to_projection(views[eye].fov, 0.1, 100.0);
             let view_mat = pose_to_view(views[eye].pose);
 
-            if let Some((vr_rend, _)) = video {
-                vr_rend.render_eye(&tex_view, proj, view_mat, &renderer.device, &renderer.queue);
+            // Fisheye shader path (only when no XR layer is in use).
+            if let Some((vr_rend, _, vs)) = video_shader {
+                vr_rend.render_eye(&tex_view, proj, view_mat, vs, eye, &renderer.device, &renderer.queue);
             } else {
-                renderer.render_xr_eye(&tex_view, proj, view_mat);
+                // Clear to transparent so the video composition layer shows through.
+                renderer.clear_xr_eye(&tex_view);
             }
 
             if let Some((p, _)) = &panel {
                 p.render_eye(&tex_view, proj, view_mat, &renderer.device, &renderer.queue);
             }
-
             if let Some((p, _)) = &browser {
                 p.render_eye(&tex_view, proj, view_mat, &renderer.device, &renderer.queue);
             }
-
             if let Some((p, _)) = &settings {
                 p.render_eye(&tex_view, proj, view_mat, &renderer.device, &renderer.queue);
             }
-
             if let Some(ptr) = pointer_renderer {
                 ptr.render_eye(&tex_view, proj, view_mat, &controllers, &pointer_hits, &renderer.device, &renderer.queue);
             }
@@ -631,9 +686,10 @@ impl VrContext {
             self.eyes[eye].swapchain.release_image().unwrap();
         }
 
-        let eyes = &self.eyes;
+        // ── build composition layer list ──────────────────────────────────────
+
+        let eyes  = &self.eyes;
         let stage = &self.stage;
-        let frame_stream = &mut self.frame_stream;
 
         let proj_views = [
             xr::CompositionLayerProjectionView::new()
@@ -662,12 +718,114 @@ impl VrContext {
                 ),
         ];
 
-        let layer = xr::CompositionLayerProjection::new()
+        // Projection layer blends over the video layer (panels + pointer are
+        // transparent everywhere except where they're actually drawn).
+        let proj_layer = xr::CompositionLayerProjection::new()
+            .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
             .space(stage)
             .views(&proj_views);
 
-        frame_stream
-            .end(frame_state.predicted_display_time, self.blend_mode, &[&layer])
+        // Pre-allocate all possible video layer structs on the stack.
+        // We fill in the applicable ones and push references into `layer_refs`.
+        let mut quad_layers: [xr::CompositionLayerQuad<xr::Vulkan>; 2] =
+            [xr::CompositionLayerQuad::new(), xr::CompositionLayerQuad::new()];
+        let mut cyl_layers: [xr::CompositionLayerCylinderKHR<xr::Vulkan>; 2] =
+            [xr::CompositionLayerCylinderKHR::new(), xr::CompositionLayerCylinderKHR::new()];
+        let mut eq_layers: [xr::CompositionLayerEquirect2KHR<xr::Vulkan>; 2] =
+            [xr::CompositionLayerEquirect2KHR::new(), xr::CompositionLayerEquirect2KHR::new()];
+
+        let mut layer_refs: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
+
+        if let Some((sc, vs)) = &video_layer {
+            let n = VideoSwapchain::layer_count(vs);
+            let mode = effective_mode(vs, self.has_cylinder, self.has_equirect2);
+            if self.frame_count == 0 {
+                println!("XR: video layer mode={:?} n={n} mode_setting={:?}", mode, vs.mode);
+            }
+
+            // Physical screen dimensions (meters).
+            let screen_w    = 3.2_f32;
+            let disp_aspect = sc.display_aspect(vs);
+            let screen_h    = screen_w / disp_aspect;
+            let zoom        = vs.zoom.max(0.1);
+
+            // ── fill layer structs ────────────────────────────────────────────
+            for i in 0..n {
+                let eye_vis = VideoSwapchain::eye_visibility(vs, i);
+                let sub     = sc.sub_image(vs, i);
+                match mode {
+                    EffectiveLayerMode::Quad => {
+                        quad_layers[i] = xr::CompositionLayerQuad::new()
+                            .space(stage)
+                            .eye_visibility(eye_vis)
+                            .sub_image(sub)
+                            .pose(forward_pose(2.5, 1.0))
+                            .size(xr::Extent2Df {
+                                width:  screen_w / zoom,
+                                height: screen_h / zoom,
+                            });
+                    }
+                    EffectiveLayerMode::Cylinder => {
+                        let central_angle = std::f32::consts::PI * 2.0 / 3.0 / zoom; // 120°/zoom
+                        let radius        = 2.5_f32;
+                        cyl_layers[i] = xr::CompositionLayerCylinderKHR::new()
+                            .space(stage)
+                            .eye_visibility(eye_vis)
+                            .sub_image(sub)
+                            .pose(forward_pose(0.0, 1.0))
+                            .radius(radius)
+                            .central_angle(central_angle)
+                            .aspect_ratio(disp_aspect);
+                    }
+                    EffectiveLayerMode::Equirect180 => {
+                        let (ch, vu, vd) = zoom_angles(
+                            std::f32::consts::PI, std::f32::consts::FRAC_PI_2,
+                            std::f32::consts::FRAC_PI_2, zoom,
+                        );
+                        eq_layers[i] = xr::CompositionLayerEquirect2KHR::new()
+                            .space(stage)
+                            .eye_visibility(eye_vis)
+                            .sub_image(sub)
+                            .pose(xr::Posef::IDENTITY)
+                            .radius(0.0)
+                            .central_horizontal_angle(ch)
+                            .upper_vertical_angle(vu)
+                            .lower_vertical_angle(-vd);
+                    }
+                    EffectiveLayerMode::Equirect360 => {
+                        let (ch, vu, vd) = zoom_angles(
+                            std::f32::consts::TAU, std::f32::consts::FRAC_PI_2,
+                            std::f32::consts::FRAC_PI_2, zoom,
+                        );
+                        eq_layers[i] = xr::CompositionLayerEquirect2KHR::new()
+                            .space(stage)
+                            .eye_visibility(eye_vis)
+                            .sub_image(sub)
+                            .pose(xr::Posef::IDENTITY)
+                            .radius(0.0)
+                            .central_horizontal_angle(ch)
+                            .upper_vertical_angle(vu)
+                            .lower_vertical_angle(-vd);
+                    }
+                }
+            }
+
+            // ── push refs (separate loop so fill borrows don't overlap) ───────
+            for i in 0..n {
+                match mode {
+                    EffectiveLayerMode::Quad      => layer_refs.push(&quad_layers[i]),
+                    EffectiveLayerMode::Cylinder  => layer_refs.push(&cyl_layers[i]),
+                    EffectiveLayerMode::Equirect180
+                    | EffectiveLayerMode::Equirect360 => layer_refs.push(&eq_layers[i]),
+                }
+            }
+        }
+
+        // Video layers go first (behind panels).
+        layer_refs.push(&proj_layer);
+
+        self.frame_stream
+            .end(frame_state.predicted_display_time, self.blend_mode, &layer_refs)
             .unwrap_or_else(|e| eprintln!("XR: frame_stream.end failed: {e}"));
 
         self.frame_count += 1;

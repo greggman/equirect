@@ -1,5 +1,5 @@
 /// Video geometry mode.
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Clone, Copy, PartialEq, Default, Debug)]
 pub enum VideoMode {
     #[default]
     Flat2D,
@@ -29,7 +29,7 @@ pub enum StereoLayout {
 }
 
 /// Persistent settings that affect how the video is rendered.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct VideoSettings {
     pub mode:   VideoMode,
     pub proj:   Projection,

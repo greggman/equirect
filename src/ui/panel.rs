@@ -101,7 +101,7 @@ impl PanelRenderer {
 
         // ── camera bind group layout ──────────────────────────────────────
         let shader = device.create_shader_module(
-            wgpu::include_wgsl!("../shaders/video-quad.wgsl"),
+            wgpu::include_wgsl!("../shaders/panel-quad.wgsl"),
         );
         let camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("panel_camera_bgl"),

@@ -12,6 +12,7 @@ use crate::pointer_renderer::PointerRenderer;
 use crate::renderer::Renderer;
 use crate::ui::browser::BrowserState;
 use crate::ui::settings::VideoSettings;
+use crate::video_layer::{VideoSwapchain, use_xr_layer};
 
 #[derive(Clone, Copy, PartialEq)]
 enum PanelMode {
@@ -34,7 +35,8 @@ pub struct App {
     renderer: Option<Renderer>,
     video_decoder: Option<VideoDecoder>,
     video_texture: Option<VideoTexture>,
-    video_renderer: Option<VideoRenderer>,
+    video_renderer: Option<VideoRenderer>,    // fisheye shader fallback
+    video_swapchain: Option<VideoSwapchain>,  // XR layer path (all other modes)
     panel_renderer: Option<PanelRenderer>,
     pointer_renderer: Option<PointerRenderer>,
     control_bar_state: ControlBarState,
@@ -59,6 +61,7 @@ impl App {
             video_decoder: None,
             video_texture: None,
             video_renderer: None,
+            video_swapchain: None,
             panel_renderer: None,
             pointer_renderer: None,
             control_bar_state: ControlBarState::default(),
@@ -105,26 +108,30 @@ impl ApplicationHandler for App {
                 Err(e) => eprintln!("Failed to open video: {e}"),
                 Ok(decoder) => {
                     let tex = VideoTexture::new(&renderer.device, decoder.width, decoder.height);
+                    // VideoRenderer is only used for the fisheye shader fallback.
                     let vr_rend = VideoRenderer::new(
                         &renderer.device,
                         target_fmt,
                         decoder.width,
                         decoder.height,
                     );
+                    // VideoSwapchain for the XR composition-layer path.
+                    let sc = vr.as_ref().and_then(|vr| {
+                        vr.create_video_swapchain(&renderer.device, decoder.width, decoder.height)
+                    });
 
                     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                         self.control_bar_state.video_name = stem.to_owned();
                     }
-
-                    // Seed duration if already known at open time.
                     if decoder.duration_us > 0 {
                         self.control_bar_state.duration_secs =
                             decoder.duration_us as f64 / 1_000_000.0;
                     }
 
-                    self.video_decoder = Some(decoder);
-                    self.video_texture = Some(tex);
-                    self.video_renderer = Some(vr_rend);
+                    self.video_decoder   = Some(decoder);
+                    self.video_texture   = Some(tex);
+                    self.video_renderer  = Some(vr_rend);
+                    self.video_swapchain = sc;
                 }
             }
         }
@@ -185,16 +192,17 @@ impl ApplicationHandler for App {
         }
 
         // Upload the latest decoded frame if one is available.
-        if let (Some(decoder), Some(texture), Some(vr_rend)) = (
-            &self.video_decoder,
-            &self.video_texture,
-            &mut self.video_renderer,
-        ) {
+        if let (Some(decoder), Some(texture)) = (&self.video_decoder, &self.video_texture) {
             if let Some(frame) = decoder.take_frame() {
                 texture.upload(&renderer.queue, &frame.data);
-                vr_rend.set_texture(&renderer.device, texture);
+                // Rebind texture in both the shader renderer and the swapchain blit.
+                if let Some(vr_rend) = &mut self.video_renderer {
+                    vr_rend.set_texture(&renderer.device, texture);
+                }
+                if let Some(sc) = &mut self.video_swapchain {
+                    sc.set_texture(&renderer.device, texture);
+                }
             }
-
             let pts_us = decoder.current_pts_us.load(Ordering::Relaxed);
             self.control_bar_state.current_secs = pts_us as f64 / 1_000_000.0;
         }
@@ -205,11 +213,31 @@ impl ApplicationHandler for App {
                     .device
                     .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
                     .ok();
+                // Drop VideoSwapchain BEFORE VrContext so xrDestroySwapchain
+                // is called while the session is still alive.
+                self.video_swapchain = None;
                 self.vr = None;
                 return;
             }
 
-            let video = self.video_renderer.as_ref().zip(self.video_texture.as_ref());
+            // Route video based on current projection setting.
+            let use_layer = use_xr_layer(&self.video_settings, vr.has_equirect2);
+            // Clone settings so we can hold &mut self.video_settings for the settings panel
+            // at the same time as we pass &VideoSettings to the video layer.
+            let video_settings_snap = self.video_settings.clone();
+            let video_layer_arg: Option<(&mut crate::video_layer::VideoSwapchain, &VideoSettings)> =
+                if use_layer {
+                    self.video_swapchain.as_mut().map(|sc| (sc, &video_settings_snap))
+                } else {
+                    None
+                };
+            let video_shader_arg = if !use_layer {
+                self.video_renderer.as_ref()
+                    .zip(self.video_texture.as_ref())
+                    .map(|(r, t)| (r, t, &video_settings_snap))
+            } else {
+                None
+            };
 
             // Only pass the panel that should currently be visible.
             let panel_arg: Option<(&mut PanelRenderer, &ControlBarState)> =
@@ -234,7 +262,8 @@ impl ApplicationHandler for App {
 
             let (actions, browser_actions, settings_actions) = vr.render_frame(
                 renderer,
-                video,
+                video_layer_arg,
+                video_shader_arg,
                 panel_arg,
                 browser_arg,
                 settings_arg,
@@ -264,9 +293,10 @@ impl ApplicationHandler for App {
                 let target_fmt = vr.swapchain_format;
 
                 // Drop old video components before opening the new file.
-                self.video_decoder = None;
-                self.video_texture  = None;
-                self.video_renderer = None;
+                self.video_swapchain = None;
+                self.video_decoder   = None;
+                self.video_texture   = None;
+                self.video_renderer  = None;
 
                 match VideoDecoder::open(new_path.clone()) {
                     Err(e) => eprintln!("Failed to open video: {e}"),
@@ -277,6 +307,9 @@ impl ApplicationHandler for App {
                         let vr_rend = VideoRenderer::new(
                             &renderer.device, target_fmt,
                             decoder.width, decoder.height,
+                        );
+                        let sc = vr.create_video_swapchain(
+                            &renderer.device, decoder.width, decoder.height,
                         );
                         if let Some(stem) = new_path.file_stem().and_then(|s| s.to_str()) {
                             self.control_bar_state.video_name = stem.to_owned();
@@ -289,10 +322,11 @@ impl ApplicationHandler for App {
                         }
                         self.control_bar_state.current_secs = 0.0;
                         self.control_bar_state.is_playing    = true;
-                        self.video_path    = Some(new_path);
-                        self.video_decoder = Some(decoder);
-                        self.video_texture = Some(tex);
-                        self.video_renderer = Some(vr_rend);
+                        self.video_path      = Some(new_path);
+                        self.video_decoder   = Some(decoder);
+                        self.video_texture   = Some(tex);
+                        self.video_renderer  = Some(vr_rend);
+                        self.video_swapchain = sc;
                     }
                 }
             }
