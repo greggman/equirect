@@ -667,7 +667,7 @@ fn extract_nv12_raw(
     sample: &windows::Win32::Media::MediaFoundation::IMFSample,
     height: usize,
 ) -> Result<VideoFrame> {
-    use windows::Win32::Media::MediaFoundation::IMF2DBuffer;
+    use windows::Win32::Media::MediaFoundation::{IMF2DBuffer, IMF2DBuffer2, MF2DBuffer_LockFlags_Read};
     use windows::core::Interface as _;
 
     let buf = unsafe {
@@ -676,15 +676,42 @@ fn extract_nv12_raw(
             .map_err(|e| anyhow!("GetBufferByIndex (NV12): {e}"))?
     };
 
-    let buf2d = buf.cast::<IMF2DBuffer>()
-        .map_err(|e| anyhow!("NV12 buffer is not IMF2DBuffer: {e}"))?;
-
     let mut scan0: *mut u8 = std::ptr::null_mut();
     let mut pitch: i32 = 0;
-    unsafe {
-        buf2d.Lock2D(&mut scan0, &mut pitch)
-            .map_err(|e| anyhow!("Lock2D (NV12): {e}"))?;
-    }
+
+    // Prefer IMF2DBuffer2::Lock2DSize — it returns the physical buffer length,
+    // which lets us derive coded_height precisely even when GetCurrentLength()
+    // reports only the display-region size.  Fall back to IMF2DBuffer::Lock2D
+    // + GetCurrentLength() on older runtimes where IMF2DBuffer2 is absent.
+    let (physical_len, buf2d) = unsafe {
+        if let Ok(b2) = buf.cast::<IMF2DBuffer2>() {
+            let mut buf_start: *mut u8 = std::ptr::null_mut();
+            let mut buf_size:  u32 = 0;
+            if b2.Lock2DSize(
+                MF2DBuffer_LockFlags_Read,
+                &mut scan0,
+                &mut pitch,
+                &mut buf_start,
+                &mut buf_size,
+            ).is_ok() {
+                // pcbBufferLength covers the full physical NV12 allocation
+                // (coded_height × stride × 3/2).  Adjust for any bytes that
+                // precede scan0 so the arithmetic below stays correct.
+                let pre = (scan0 as usize).saturating_sub(buf_start as usize);
+                let effective = (buf_size as usize).saturating_sub(pre);
+                (effective, buf.cast::<IMF2DBuffer>().ok())
+            } else {
+                (0usize, buf.cast::<IMF2DBuffer>().ok())
+            }
+        } else {
+            let b = buf.cast::<IMF2DBuffer>()
+                .map_err(|e| anyhow!("NV12 buffer is not IMF2DBuffer: {e}"))?;
+            b.Lock2D(&mut scan0, &mut pitch)
+                .map_err(|e| anyhow!("Lock2D (NV12): {e}"))?;
+            let cur = buf.GetCurrentLength().unwrap_or(0) as usize;
+            (cur, Some(b))
+        }
+    };
 
     let stride = pitch.unsigned_abs() as usize;
 
@@ -693,17 +720,14 @@ fn extract_nv12_raw(
     // HEVC: 64 px), so coded_height ≥ display_height.  The UV plane starts at
     // coded_height × stride, not display_height × stride.
     //
-    // Derive coded_height from the buffer's actual byte length:
+    // Derive coded_height from the physical NV12 buffer length:
     //   total = coded_height × stride × 3/2
-    //   => coded_height = total / stride × 2/3
-    //   => uv_offset    = coded_height × stride = total × 2/3
-    let buf_len = unsafe { buf.GetCurrentLength().unwrap_or(0) } as usize;
-    let uv_offset = if stride > 0 && buf_len >= height * stride {
-        // Round to whole rows then scale by 2/3.
-        let total_rows = buf_len / stride; // coded_height × 3/2
-        (total_rows / 3 * 2) * stride      // coded_height × stride
+    //   => uv_offset = coded_height × stride = total × 2/3
+    let uv_offset = if stride > 0 && physical_len >= height * stride {
+        let total_rows = physical_len / stride; // coded_height × 3/2
+        (total_rows / 3 * 2) * stride           // coded_height × stride
     } else {
-        height * stride  // safe fallback (may be wrong for padded codecs)
+        height * stride  // fallback: correct when coded_height == display_height
     };
 
     let uv_bytes = (height / 2) * stride;
@@ -711,7 +735,7 @@ fn extract_nv12_raw(
     let mut data = vec![0u8; copy_len];
     unsafe {
         std::ptr::copy_nonoverlapping(scan0, data.as_mut_ptr(), copy_len);
-        buf2d.Unlock2D().ok();
+        if let Some(b) = buf2d { b.Unlock2D().ok(); }
     }
 
     Ok(VideoFrame { data, format: VideoFormat::Nv12 { stride, uv_offset } })
