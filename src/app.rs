@@ -231,7 +231,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let Some(renderer) = &self.renderer else { return };
 
         // Sync duration once the decoder has it (it arrives async from the media source).
@@ -622,6 +622,7 @@ impl ApplicationHandler for App {
 
             if actions.exit {
                 vr.request_exit();
+                event_loop.exit();
             }
         }
 
