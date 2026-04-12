@@ -11,11 +11,13 @@ use winit::{
 use crate::pointer_renderer::PointerRenderer;
 use crate::renderer::Renderer;
 use crate::ui::browser::BrowserState;
+use crate::ui::settings::VideoSettings;
 
 #[derive(Clone, Copy, PartialEq)]
 enum PanelMode {
     ControlBar,
     Browser,
+    Settings,
     Hidden,
 }
 use crate::ui::control_bar::{ControlBarState, SPEEDS};
@@ -40,6 +42,9 @@ pub struct App {
     // File browser
     browser_state: Option<BrowserState>,
     browser_panel: Option<PanelRenderer>,
+    // Settings
+    video_settings: VideoSettings,
+    settings_panel: Option<PanelRenderer>,
     // Panel visibility
     panel_mode: PanelMode,
     /// Which mode to restore when B/Y un-hides; defaults to ControlBar.
@@ -60,6 +65,8 @@ impl App {
             video_path,
             browser_state: None,
             browser_panel: None,
+            video_settings: VideoSettings::new(),
+            settings_panel: None,
             panel_mode: PanelMode::ControlBar,
             hidden_from: PanelMode::ControlBar,
         }
@@ -218,11 +225,19 @@ impl ApplicationHandler for App {
                     None
                 };
 
-            let (actions, browser_actions) = vr.render_frame(
+            let settings_arg: Option<(&mut PanelRenderer, &mut VideoSettings)> =
+                if self.panel_mode == PanelMode::Settings {
+                    self.settings_panel.as_mut().map(|p| (p, &mut self.video_settings))
+                } else {
+                    None
+                };
+
+            let (actions, browser_actions, settings_actions) = vr.render_frame(
                 renderer,
                 video,
                 panel_arg,
                 browser_arg,
+                settings_arg,
                 self.pointer_renderer.as_ref(),
             );
 
@@ -280,6 +295,12 @@ impl ApplicationHandler for App {
                         self.video_renderer = Some(vr_rend);
                     }
                 }
+            }
+
+            // ── handle settings actions ────────────────────────────────────
+
+            if settings_actions.close {
+                self.panel_mode = PanelMode::ControlBar;
             }
 
             // ── handle control bar actions ─────────────────────────────────
@@ -343,6 +364,24 @@ impl ApplicationHandler for App {
                         *dec.seek_request.lock().unwrap() = Some(target_us);
                     }
                 }
+            }
+
+            if actions.show_settings && self.panel_mode != PanelMode::Settings {
+                // Lazily create the settings panel the first time.
+                if self.settings_panel.is_none() {
+                    let target_fmt = vr.swapchain_format;
+                    // 800×500 px canvas displayed at 1.6 m × 1.0 m, centred at eye level.
+                    self.settings_panel = Some(PanelRenderer::new(
+                        &renderer.device,
+                        target_fmt,
+                        800,
+                        500,
+                        glam::Vec3::new(0.0, 1.2, -2.0),
+                        1.6,
+                        1.0,
+                    ));
+                }
+                self.panel_mode = PanelMode::Settings;
             }
 
             if actions.show_browser && self.panel_mode != PanelMode::Browser {

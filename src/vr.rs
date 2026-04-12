@@ -7,6 +7,7 @@ use crate::renderer::Renderer;
 use crate::ui::browser::{BrowserActions, BrowserState, draw as browser_draw};
 use crate::ui::control_bar::{ControlBarActions, ControlBarState};
 use crate::ui::panel::PanelRenderer;
+use crate::ui::settings::{SettingsActions, VideoSettings, draw as settings_draw};
 use crate::video::texture::VideoTexture;
 use crate::video_renderer::VideoRenderer;
 
@@ -496,23 +497,24 @@ impl VrContext {
         video:            Option<(&VideoRenderer, &VideoTexture)>,
         mut panel:        Option<(&mut PanelRenderer, &ControlBarState)>,
         mut browser:      Option<(&mut PanelRenderer, &mut BrowserState)>,
+        mut settings:     Option<(&mut PanelRenderer, &mut VideoSettings)>,
         pointer_renderer: Option<&PointerRenderer>,
-    ) -> (ControlBarActions, BrowserActions) {
+    ) -> (ControlBarActions, BrowserActions, SettingsActions) {
         if !self.poll_events() {
-            return (ControlBarActions::default(), BrowserActions::default());
+            return (ControlBarActions::default(), BrowserActions::default(), SettingsActions::default());
         }
 
         let frame_state = match self.frame_waiter.wait() {
             Ok(fs) => fs,
             Err(e) => {
                 eprintln!("XR: frame_waiter.wait failed: {e}");
-                return (ControlBarActions::default(), BrowserActions::default());
+                return (ControlBarActions::default(), BrowserActions::default(), SettingsActions::default());
             }
         };
 
         if let Err(e) = self.frame_stream.begin() {
             eprintln!("XR: frame_stream.begin failed: {e}");
-            return (ControlBarActions::default(), BrowserActions::default());
+            return (ControlBarActions::default(), BrowserActions::default(), SettingsActions::default());
         }
 
         if !frame_state.should_render {
@@ -520,7 +522,7 @@ impl VrContext {
                 .end(frame_state.predicted_display_time, self.blend_mode, &[])
                 .unwrap_or_else(|e| eprintln!("XR: frame_stream.end (no render) failed: {e}"));
             self.frame_count += 1;
-            return (ControlBarActions::default(), BrowserActions::default());
+            return (ControlBarActions::default(), BrowserActions::default(), SettingsActions::default());
         }
 
         // Poll controller input using the frame's predicted display time.
@@ -545,7 +547,7 @@ impl VrContext {
                 self.frame_stream
                     .end(frame_state.predicted_display_time, self.blend_mode, &[])
                     .ok();
-                return (ControlBarActions::default(), BrowserActions::default());
+                return (ControlBarActions::default(), BrowserActions::default(), SettingsActions::default());
             }
         };
 
@@ -570,6 +572,15 @@ impl VrContext {
             None => BrowserActions::default(),
         };
 
+        // Update the settings panel egui texture once (shared by both eyes).
+        let settings_actions = match &mut settings {
+            Some((p, s)) => p.update_ui(
+                &renderer.device, &renderer.queue, &controllers,
+                |ui, just_released| settings_draw(ui, s, just_released),
+            ),
+            None => SettingsActions::default(),
+        };
+
         // Compute where each controller ray hits any active panel (for beam truncation).
         let pointer_hits: [Option<glam::Vec3>; 2] = {
             let mut h = [None, None];
@@ -578,6 +589,8 @@ impl VrContext {
                     let hit = panel.as_ref()
                         .and_then(|(p, _)| p.hit_test_3d(ctrl.ray_origin, ctrl.ray_dir))
                         .or_else(|| browser.as_ref()
+                            .and_then(|(p, _)| p.hit_test_3d(ctrl.ray_origin, ctrl.ray_dir)))
+                        .or_else(|| settings.as_ref()
                             .and_then(|(p, _)| p.hit_test_3d(ctrl.ray_origin, ctrl.ray_dir)));
                     h[i] = hit;
                 }
@@ -604,6 +617,10 @@ impl VrContext {
             }
 
             if let Some((p, _)) = &browser {
+                p.render_eye(&tex_view, proj, view_mat, &renderer.device, &renderer.queue);
+            }
+
+            if let Some((p, _)) = &settings {
                 p.render_eye(&tex_view, proj, view_mat, &renderer.device, &renderer.queue);
             }
 
@@ -654,6 +671,6 @@ impl VrContext {
             .unwrap_or_else(|e| eprintln!("XR: frame_stream.end failed: {e}"));
 
         self.frame_count += 1;
-        (cb_actions, browser_actions)
+        (cb_actions, browser_actions, settings_actions)
     }
 }
