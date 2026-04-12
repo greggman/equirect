@@ -1,4 +1,5 @@
 use openxr as xr;
+use crate::vprintln;
 
 /// Snapshot of one controller for a single frame.
 #[derive(Clone, Copy)]
@@ -153,7 +154,7 @@ impl XrInput {
                 .ok()?,
         ];
 
-        println!("XR: controller input ready");
+        vprintln!("XR: controller input ready");
         Some(Self { action_set, pose_action, click_action, thumbstick_action, menu_action, grip_action, aim_spaces, hand_paths })
     }
 

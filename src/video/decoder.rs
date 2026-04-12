@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use crate::vprintln;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -327,7 +328,7 @@ fn open_and_decode(
         ((fs >> 32) as u32, (fs & 0xFFFF_FFFF) as u32)
     };
 
-    println!("Video: {width}x{height} (output), format: {fmt:?}");
+    vprintln!("Video: {width}x{height} (output), format: {fmt:?}");
 
     let duration_us = unsafe { query_duration_us(&reader) };
 
@@ -719,7 +720,7 @@ fn open_and_decode_audio(
         let ch = cur.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS).unwrap_or(2) as u16;
         (sr, ch)
     };
-    println!("Audio: {sample_rate} Hz, {channels} ch");
+    vprintln!("Audio: {sample_rate} Hz, {channels} ch");
     let _ = format_tx.send(Some((sample_rate, channels)));
 
     loop {

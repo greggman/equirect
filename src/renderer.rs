@@ -1,5 +1,6 @@
 use std::ffi::CStr;
 use std::sync::Arc;
+use crate::vprintln;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
@@ -80,7 +81,7 @@ impl Renderer {
                 .copied()
                 .collect();
 
-            println!("Renderer: injecting XR extensions: {extra:?}");
+            vprintln!("Renderer: injecting XR extensions: {extra:?}");
 
             let hal_device = unsafe {
                 hal_adapter.open_with_callback(

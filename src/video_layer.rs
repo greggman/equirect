@@ -10,6 +10,7 @@
 
 use std::mem::ManuallyDrop;
 use openxr as xr;
+use crate::vprintln;
 
 use crate::ui::settings::{StereoLayout, VideoMode, VideoSettings};
 use crate::video::texture::VideoTexture;
@@ -197,7 +198,7 @@ impl VideoSwapchain {
             .map(|&img| unsafe { wrap_xr_image_render(device, img, width, height, format) })
             .collect();
 
-        println!("XR: video swapchain {}×{} × {} images ({:?})", width, height, raw_images.len(), format);
+        vprintln!("XR: video swapchain {}×{} × {} images ({:?})", width, height, raw_images.len(), format);
 
         let blit = VideoBlit::new(device, format);
         Some(Self {

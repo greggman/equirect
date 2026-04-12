@@ -1,5 +1,6 @@
 use std::ffi::CStr;
 use openxr as xr;
+use crate::vprintln;
 
 use crate::input::{ControllerState, XrInput};
 use crate::pointer_renderer::PointerRenderer;
@@ -177,7 +178,7 @@ pub struct VrPreInit {
 
 impl VrPreInit {
     pub fn new() -> Option<Self> {
-        println!("XR: loading OpenXR...");
+        vprintln!("XR: loading OpenXR...");
 
         let xr_entry = unsafe { xr::Entry::load() }
             .map_err(|e| eprintln!("XR: loader not found: {e}"))
@@ -221,7 +222,7 @@ impl VrPreInit {
             .map_err(|e| eprintln!("XR: no HMD system found: {e}"))
             .ok()?;
 
-        println!("XR: HMD found");
+        vprintln!("XR: HMD found");
 
         Some(Self {
             instance,
@@ -247,7 +248,7 @@ impl VrPreInit {
             }
         };
 
-        println!("XR: runtime requires device extensions: {ext_string}");
+        vprintln!("XR: runtime requires device extensions: {ext_string}");
 
         ext_string
             .split_ascii_whitespace()
@@ -398,7 +399,7 @@ impl VrContext {
                 .ok()?
         };
 
-        println!("XR: session created");
+        vprintln!("XR: session created");
 
         let stage = session
             .create_reference_space(xr::ReferenceSpaceType::STAGE, xr::Posef::IDENTITY)
@@ -439,7 +440,7 @@ impl VrContext {
             }
         };
 
-        println!("XR: swapchain format {wgpu_fmt:?}");
+        vprintln!("XR: swapchain format {wgpu_fmt:?}");
 
         // ── create per-eye swapchains ────────────────────────────────────────
         let mut eyes: [Option<EyeSwapchain>; 2] = [None, None];
@@ -480,7 +481,7 @@ impl VrContext {
                 resolution: xr::Extent2Di { width: w as i32, height: h as i32 },
                 format: wgpu_fmt,
             };
-            println!("XR: eye {i}: {}x{} × {} images ({:?})", w, h, raw_images.len(), eye.format);
+            vprintln!("XR: eye {i}: {}x{} × {} images ({:?})", w, h, raw_images.len(), eye.format);
             eyes[i] = Some(eye);
         }
 
@@ -489,7 +490,7 @@ impl VrContext {
             return None;
         };
 
-        println!("XR: ready — waiting for headset (cylinder={has_cylinder}, equirect2={has_equirect2})");
+        vprintln!("XR: ready — waiting for headset (cylinder={has_cylinder}, equirect2={has_equirect2})");
 
         // Input actions — set up now so bindings are registered before session starts.
         let xr_input = XrInput::new(&xr_instance, &session);
@@ -553,14 +554,14 @@ impl VrContext {
             use xr::Event::*;
             match event {
                 SessionStateChanged(e) => {
-                    println!("XR: session → {:?}", e.state());
+                    vprintln!("XR: session → {:?}", e.state());
                     match e.state() {
                         xr::SessionState::READY => {
                             self.session
                                 .begin(self.view_type)
                                 .expect("XR session.begin() failed");
                             self.running = true;
-                            println!("XR: rendering started");
+                            vprintln!("XR: rendering started");
                         }
                         xr::SessionState::STOPPING => {
                             self.session.end().expect("XR session.end() failed");
@@ -627,7 +628,7 @@ impl VrContext {
             };
 
         if self.frame_count == 0 {
-            println!("XR: first rendered frame");
+            vprintln!("XR: first rendered frame");
         }
 
         let (_flags, views) = match self
@@ -649,7 +650,7 @@ impl VrContext {
         if !self.orientation_initialized {
             self.base_orientation = yaw_quat_from_head(&views[0].pose);
             self.orientation_initialized = true;
-            println!("XR: base orientation initialised (yaw-only)");
+            vprintln!("XR: base orientation initialised (yaw-only)");
         }
 
         // Edge-detect grip press — either controller resets the base orientation
@@ -659,7 +660,7 @@ impl VrContext {
         self.prev_grip_pressed = any_grip_now;
         if grip_just_pressed {
             self.base_orientation = full_quat_from_head(&views[0].pose);
-            println!("XR: base orientation reset (full)");
+            vprintln!("XR: base orientation reset (full)");
         }
 
         // Edge-detect B/Y menu button across both controllers.
@@ -855,7 +856,7 @@ impl VrContext {
             let n = VideoSwapchain::layer_count(vs);
             let mode = effective_mode(vs, self.has_cylinder, self.has_equirect2);
             if self.frame_count == 0 {
-                println!("XR: video layer mode={:?} n={n} mode_setting={:?}", mode, vs.mode);
+                vprintln!("XR: video layer mode={:?} n={n} mode_setting={:?}", mode, vs.mode);
             }
 
             // Physical screen dimensions (meters).

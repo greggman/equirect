@@ -10,10 +10,37 @@ mod video_meta;
 mod video_renderer;
 mod vr;
 
-fn main() {
-    let arg = std::env::args().nth(1).map(std::path::PathBuf::from);
+/// Set to `true` when `-v` / `--verbose` is passed on the command line.
+pub static VERBOSE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
-    let (video_path, initial_browser_dir) = match arg {
+/// Print to stdout only when `-v` / `--verbose` was passed.
+#[macro_export]
+macro_rules! vprintln {
+    ($($arg:tt)*) => {
+        if crate::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
+            println!($($arg)*);
+        }
+    };
+}
+
+fn main() {
+    // Parse args: strip -v/--verbose flags; first remaining arg is the path.
+    let mut verbose = false;
+    let mut path_arg: Option<std::path::PathBuf> = None;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "-v" | "--verbose" => verbose = true,
+            _ => {
+                if path_arg.is_none() {
+                    path_arg = Some(std::path::PathBuf::from(arg));
+                }
+            }
+        }
+    }
+    VERBOSE.store(verbose, std::sync::atomic::Ordering::Relaxed);
+
+    let (video_path, initial_browser_dir) = match path_arg {
         // Explicit directory → open browser there.
         Some(p) if p.is_dir() => (None, Some(p)),
         // Explicit file → play it, and save its folder as the last browsed dir.
