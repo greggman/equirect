@@ -34,9 +34,15 @@ pub struct VideoDecoder {
     pub loop_end_us: Arc<AtomicU64>,
     /// Write a microsecond target here to request a seek.
     pub seek_request: Arc<Mutex<Option<u64>>>,
+    /// Audio seek target in microseconds; u64::MAX means no seek pending.
+    pub audio_seek: Arc<AtomicU64>,
+    /// Incremented on every seek so the cpal callback flushes stale buffered audio.
+    pub audio_flush_gen: Arc<AtomicU64>,
     pub width: u32,
     pub height: u32,
     _thread: thread::JoinHandle<()>,
+    _audio_thread: thread::JoinHandle<()>,
+    _audio_player: Option<crate::audio::AudioPlayer>,
 }
 
 impl VideoDecoder {
@@ -51,14 +57,29 @@ impl VideoDecoder {
         let loop_start_us   = Arc::new(AtomicU64::new(0));
         let loop_end_us     = Arc::new(AtomicU64::new(0));
         let seek_request    = Arc::new(Mutex::new(None::<u64>));
+        let audio_seek      = Arc::new(AtomicU64::new(u64::MAX));
+        let audio_flush_gen = Arc::new(AtomicU64::new(0));
 
-        let pts_c   = Arc::clone(&current_pts_us);
-        let pau_c   = Arc::clone(&paused);
-        let spd_c   = Arc::clone(&speed_index);
-        let lps_c   = Arc::clone(&loop_state);
-        let lps_start_c = Arc::clone(&loop_start_us);
-        let lps_end_c   = Arc::clone(&loop_end_us);
-        let seek_c  = Arc::clone(&seek_request);
+        // Bounded channel: ~2 seconds of float32 stereo audio at 48 kHz.
+        let (audio_tx, audio_rx) =
+            std::sync::mpsc::sync_channel::<f32>(48_000 * 2 * 2);
+        let (audio_fmt_tx, audio_fmt_rx) =
+            std::sync::mpsc::channel::<Option<(u32, u16)>>();
+
+        let pts_c        = Arc::clone(&current_pts_us);
+        let pau_c        = Arc::clone(&paused);
+        let spd_c        = Arc::clone(&speed_index);
+        let lps_c        = Arc::clone(&loop_state);
+        let lps_start_c  = Arc::clone(&loop_start_us);
+        let lps_end_c    = Arc::clone(&loop_end_us);
+        let seek_c       = Arc::clone(&seek_request);
+
+        // Clone path before moving it into the video thread.
+        let audio_path      = path.clone();
+        let audio_paused    = Arc::clone(&paused);
+        let audio_speed     = Arc::clone(&speed_index);
+        let audio_seek_c    = Arc::clone(&audio_seek);
+        let audio_flush_c   = Arc::clone(&audio_flush_gen);
 
         let handle = thread::Builder::new()
             .name("video-decode".into())
@@ -70,9 +91,32 @@ impl VideoDecoder {
                 )
             })?;
 
+        let audio_handle = thread::Builder::new()
+            .name("audio-decode".into())
+            .spawn(move || {
+                audio_decode_thread(
+                    audio_path, audio_fmt_tx, audio_tx,
+                    audio_paused, audio_speed, audio_seek_c, audio_flush_c,
+                )
+            })?;
+
         let (width, height, duration_us) = init_rx
             .recv()
             .map_err(|_| anyhow!("Decoder thread exited before sending init result"))??;
+
+        // Wait up to 5 s for the audio thread to report its format (or None = no audio).
+        let audio_player = audio_fmt_rx
+            .recv_timeout(Duration::from_secs(5))
+            .ok()
+            .flatten()
+            .and_then(|(sr, ch)| {
+                crate::audio::AudioPlayer::start(
+                    audio_rx, sr, ch,
+                    Arc::clone(&paused),
+                    Arc::clone(&speed_index),
+                    Arc::clone(&audio_flush_gen),
+                )
+            });
 
         Ok(Self {
             latest,
@@ -84,9 +128,13 @@ impl VideoDecoder {
             loop_start_us,
             loop_end_us,
             seek_request,
+            audio_seek,
+            audio_flush_gen,
             width,
             height,
             _thread: handle,
+            _audio_thread: audio_handle,
+            _audio_player: audio_player,
         })
     }
 
@@ -578,6 +626,163 @@ fn nv12_to_bgra(src: &[u8], w: usize, h: usize) -> Vec<u8> {
         }
     }
     dst
+}
+
+// ── audio decode thread ───────────────────────────────────────────────────
+
+fn audio_decode_thread(
+    path: PathBuf,
+    format_tx: std::sync::mpsc::Sender<Option<(u32, u16)>>,
+    producer: std::sync::mpsc::SyncSender<f32>,
+    paused: Arc<AtomicBool>,
+    speed_index: Arc<AtomicU32>,
+    audio_seek: Arc<AtomicU64>,
+    audio_flush_gen: Arc<AtomicU64>,
+) {
+    use windows::Win32::Media::MediaFoundation::*;
+    use windows::Win32::System::Com::*;
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        const MF_VER: u32 = 0x0002_0070;
+        const MFSTARTUP_NOSOCKET: u32 = 0x1;
+        if MFStartup(MF_VER, MFSTARTUP_NOSOCKET).is_err() {
+            let _ = format_tx.send(None);
+            CoUninitialize();
+            return;
+        }
+        match open_and_decode_audio(
+            path, &format_tx, &producer,
+            &paused, &speed_index, &audio_seek, &audio_flush_gen,
+        ) {
+            Ok(()) => {}
+            Err(e) => eprintln!("Audio decoder error: {e}"),
+        }
+        let _ = MFShutdown();
+        CoUninitialize();
+    }
+}
+
+fn open_and_decode_audio(
+    path: PathBuf,
+    format_tx: &std::sync::mpsc::Sender<Option<(u32, u16)>>,
+    producer: &std::sync::mpsc::SyncSender<f32>,
+    paused: &Arc<AtomicBool>,
+    speed_index: &Arc<AtomicU32>,
+    audio_seek: &Arc<AtomicU64>,
+    audio_flush_gen: &Arc<AtomicU64>,
+) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Media::MediaFoundation::*;
+    use windows::core::PCWSTR;
+
+    const FIRST_AUDIO: u32 = 0xFFFF_FFFD; // MF_SOURCE_READER_FIRST_AUDIO_STREAM
+    const ALL_STREAMS: u32 = 0xFFFF_FFFE;
+    const NO_SEEK: u64 = u64::MAX;
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0u16]).collect();
+    let url = PCWSTR(wide.as_ptr());
+
+    let reader: IMFSourceReader = unsafe {
+        MFCreateSourceReaderFromURL(url, None)
+            .map_err(|e| anyhow!("Audio: open failed: {e}"))?
+    };
+
+    unsafe {
+        reader.SetStreamSelection(ALL_STREAMS, false).ok();
+        if reader.SetStreamSelection(FIRST_AUDIO, true).is_err() {
+            let _ = format_tx.send(None);
+            return Ok(()); // no audio stream
+        }
+    }
+
+    // Request 32-bit float PCM output.
+    let format_ok = unsafe {
+        let out_type = MFCreateMediaType()
+            .map_err(|e| anyhow!("MFCreateMediaType: {e}"))?;
+        out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).ok();
+        out_type.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_Float).ok();
+        out_type.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 32).ok();
+        reader.SetCurrentMediaType(FIRST_AUDIO, None, &out_type).is_ok()
+    };
+
+    if !format_ok {
+        let _ = format_tx.send(None);
+        return Ok(());
+    }
+
+    let (sample_rate, channels) = unsafe {
+        let cur = reader
+            .GetCurrentMediaType(FIRST_AUDIO)
+            .map_err(|e| anyhow!("GetCurrentMediaType (audio): {e}"))?;
+        let sr = cur.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND).unwrap_or(48_000);
+        let ch = cur.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS).unwrap_or(2) as u16;
+        (sr, ch)
+    };
+    println!("Audio: {sample_rate} Hz, {channels} ch");
+    let _ = format_tx.send(Some((sample_rate, channels)));
+
+    loop {
+        // Handle seek request from the main thread.
+        let seek_us = audio_seek.load(Ordering::Relaxed);
+        if seek_us != NO_SEEK
+            && audio_seek
+                .compare_exchange(seek_us, NO_SEEK, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            unsafe { seek_reader_to(&reader, seek_us) };
+            // flush_gen was already bumped by app.rs; cpal callback will drain stale samples.
+        }
+
+        // Throttle: if the channel is full, wait for the consumer to catch up.
+        // (sync_channel capacity is the full ~2 s ring; full means we're well ahead.)
+        // We detect fullness by a failed try_send below; no pre-check needed here.
+
+        // Read next audio sample from MF.
+        let mut flags: u32 = 0;
+        let mut timestamp: i64 = 0;
+        let mut sample: Option<IMFSample> = None;
+        unsafe {
+            reader
+                .ReadSample(
+                    FIRST_AUDIO,
+                    0,
+                    None,
+                    Some(&mut flags as *mut u32 as *mut _),
+                    Some(&mut timestamp),
+                    Some(&mut sample),
+                )
+                .map_err(|e| anyhow!("Audio ReadSample: {e}"))?;
+        }
+
+        if flags & 0x04 != 0 {
+            break; // EOF
+        }
+
+        let Some(sample) = sample else { continue };
+
+        let bytes = lock_contiguous(&sample)?;
+        // Interpret raw bytes as little-endian f32 PCM.
+        let floats: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+
+        // Push all floats into the channel, yielding when it is full.
+        for &sample in floats.iter() {
+            // Abort if a seek arrives — don't fill the channel with stale audio.
+            if audio_seek.load(Ordering::Relaxed) != NO_SEEK {
+                break;
+            }
+            // Block-send: parks this thread until there is room.
+            // The channel is disconnected only when VideoDecoder is dropped.
+            if producer.send(sample).is_err() {
+                return Ok(()); // consumer gone, shut down
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn yuy2_to_bgra(src: &[u8], w: usize, h: usize) -> Vec<u8> {

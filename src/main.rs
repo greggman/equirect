@@ -1,4 +1,5 @@
 mod app;
+mod audio;
 mod input;
 mod pointer_renderer;
 mod renderer;

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
@@ -414,6 +415,9 @@ impl ApplicationHandler for App {
                     if dec.duration_us > 0 {
                         let target_us = (frac as f64 * dec.duration_us as f64) as u64;
                         *dec.seek_request.lock().unwrap() = Some(target_us);
+                        // Signal the audio thread and flush stale buffered audio.
+                        dec.audio_seek.store(target_us, Ordering::Relaxed);
+                        dec.audio_flush_gen.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
