@@ -4,6 +4,10 @@ A Rust VR Video Player
 
 [Download here](https://github.com/greggman/equirect/releases/latest)
 
+Note: At the moment it will start in your home folder and, while you can
+switch folders, you can not switch drives (on the todo list). You can start
+it from the command line with a video or a folder though
+
 ---
 
 Hopefully this is portable or a step at being portable. It uses WebGPU for the
