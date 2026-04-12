@@ -80,8 +80,6 @@ pub struct App {
     settings_panel: Option<PanelRenderer>,
     // Panel visibility
     panel_mode: PanelMode,
-    /// Which mode to restore when B/Y un-hides; defaults to ControlBar.
-    hidden_from: PanelMode,
 }
 
 impl App {
@@ -109,7 +107,6 @@ impl App {
             video_settings: VideoSettings::new(),
             settings_panel: None,
             panel_mode,
-            hidden_from: PanelMode::ControlBar,
         }
     }
 }
@@ -316,6 +313,13 @@ impl ApplicationHandler for App {
                     None
                 };
 
+            // Pointers are shown whenever a panel is visible; hidden otherwise.
+            let pointer_arg = if self.panel_mode != PanelMode::Hidden {
+                self.pointer_renderer.as_ref()
+            } else {
+                None
+            };
+
             let (actions, browser_actions, settings_actions) = vr.render_frame(
                 renderer,
                 video_layer_arg,
@@ -323,7 +327,7 @@ impl ApplicationHandler for App {
                 panel_arg,
                 browser_arg,
                 settings_arg,
-                self.pointer_renderer.as_ref(),
+                pointer_arg,
             );
 
             // ── handle browser actions ─────────────────────────────────────
@@ -349,7 +353,6 @@ impl ApplicationHandler for App {
                 self.browser_state = None;
                 self.browser_panel = None;
                 self.panel_mode    = PanelMode::Hidden;
-                self.hidden_from   = PanelMode::ControlBar;
 
                 let target_fmt = vr.swapchain_format;
 
@@ -589,14 +592,18 @@ impl ApplicationHandler for App {
                 self.panel_mode = PanelMode::Browser;
             }
 
-            // ── B / Y button: toggle panel visibility ─────────────────────
+            // ── B / Y button: back button ──────────────────────────────────
+            // Hidden      → show control bar (and pointers)
+            // ControlBar  → hide control bar (and pointers)
+            // Settings    → back to control bar
+            // Browser     → back to control bar
             if actions.menu_toggle {
-                if self.panel_mode != PanelMode::Hidden {
-                    self.hidden_from = self.panel_mode;
-                    self.panel_mode  = PanelMode::Hidden;
-                } else {
-                    self.panel_mode = self.hidden_from;
-                }
+                self.panel_mode = match self.panel_mode {
+                    PanelMode::Hidden     => PanelMode::ControlBar,
+                    PanelMode::ControlBar => PanelMode::Hidden,
+                    PanelMode::Settings   => PanelMode::ControlBar,
+                    PanelMode::Browser    => PanelMode::ControlBar,
+                };
             }
 
             if actions.exit {
