@@ -428,6 +428,8 @@ fn open_and_decode(
     let mut pts_start: i64 = 0;
     let mut decode_one = false; // allow one frame decode even while paused (for seek preview)
     let mut last_speed_index = speed_index.load(Ordering::Relaxed);
+    // When Some(us), decode frames without displaying/pacing until pts_us >= us.
+    let mut seek_until_us: Option<u64> = None;
 
     'decode: loop {
         // ── seek request ───────────────────────────────────────────────────
@@ -436,6 +438,7 @@ fn open_and_decode(
             if let Some(us) = target {
                 unsafe { seek_reader_to(&reader, us) };
                 wall_start = None;
+                seek_until_us = Some(us);
                 decode_one = true; // show the seeked frame even if paused
             }
         }
@@ -504,6 +507,17 @@ fn open_and_decode(
         }
 
         current_pts_us.store(pts_us, Ordering::Relaxed);
+
+        // ── seek catch-up: skip pacing and display until we reach target ──
+        if let Some(until) = seek_until_us {
+            if pts_us < until {
+                // Still catching up — decode without displaying or sleeping.
+                continue 'decode;
+            }
+            // Reached (or passed) the target: resume normal playback.
+            seek_until_us = None;
+            wall_start = None; // reset pacing so we don't try to make up lost time
+        }
 
         // ── speed-adjusted pacing ──────────────────────────────────────────
         let speed = SPEEDS[speed_index.load(Ordering::Relaxed) as usize];

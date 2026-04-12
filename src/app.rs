@@ -80,6 +80,11 @@ pub struct App {
     settings_panel: Option<PanelRenderer>,
     // Panel visibility
     panel_mode: PanelMode,
+    /// While `Some(t)`, pin the scrubber at `t` rather than following the
+    /// decoder's current PTS.  The pin is released once the decoder reaches `t`
+    /// (within one frame), or after `seek_timeout` as a safety net.
+    seek_target_secs: Option<f64>,
+    seek_timeout: Option<std::time::Instant>,
 }
 
 impl App {
@@ -107,6 +112,8 @@ impl App {
             video_settings: VideoSettings::new(),
             settings_panel: None,
             panel_mode,
+            seek_target_secs: None,
+            seek_timeout: None,
         }
     }
 }
@@ -256,8 +263,25 @@ impl ApplicationHandler for App {
                     sc.set_texture(&renderer.device, &renderer.queue, texture);
                 }
             }
+            // Pin the scrubber at the seek target until the decoder actually
+            // reaches that position (within 0.1 s) or a 5-second safety
+            // timeout expires.  This prevents the scrubber from snapping back
+            // while the decoder is decoding forward from the keyframe.
             let pts_us = decoder.current_pts_us.load(Ordering::Relaxed);
-            self.control_bar_state.current_secs = pts_us as f64 / 1_000_000.0;
+            let pts_secs = pts_us as f64 / 1_000_000.0;
+            if let Some(target) = self.seek_target_secs {
+                let timed_out = self.seek_timeout
+                    .map_or(false, |t| std::time::Instant::now() >= t);
+                let reached = pts_secs >= target - 0.1;
+                if reached || timed_out {
+                    self.control_bar_state.current_secs = pts_secs;
+                    self.seek_target_secs = None;
+                    self.seek_timeout = None;
+                }
+                // else: keep current_secs pinned at target (scrubber stays put)
+            } else {
+                self.control_bar_state.current_secs = pts_secs;
+            }
         }
 
         if let Some(vr) = &mut self.vr {
@@ -480,9 +504,17 @@ impl ApplicationHandler for App {
                     if dec.duration_us > 0 {
                         let target_us = (frac as f64 * dec.duration_us as f64) as u64;
                         *dec.seek_request.lock().unwrap() = Some(target_us);
-                        // Signal the audio thread and flush stale buffered audio.
                         dec.audio_seek.store(target_us, Ordering::Relaxed);
                         dec.audio_flush_gen.fetch_add(1, Ordering::Relaxed);
+                        // Show the target position immediately; hold the scrubber
+                        // there until the decoder catches up.
+                        let target_secs = target_us as f64 / 1_000_000.0;
+                        self.control_bar_state.current_secs = target_secs;
+                        self.seek_target_secs = Some(target_secs);
+                        self.seek_timeout = Some(
+                            std::time::Instant::now()
+                                + std::time::Duration::from_millis(500),
+                        );
                     }
                 }
             }
@@ -491,12 +523,20 @@ impl ApplicationHandler for App {
                 if let Some(dec) = &self.video_decoder {
                     if dec.duration_us > 0 {
                         let duration_secs = dec.duration_us as f64 / 1_000_000.0;
-                        let current_secs  = dec.current_pts_us.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+                        let current_secs  = self.control_bar_state.current_secs;
                         let target_secs   = (current_secs + delta_secs).rem_euclid(duration_secs);
                         let target_us     = (target_secs * 1_000_000.0) as u64;
                         *dec.seek_request.lock().unwrap() = Some(target_us);
                         dec.audio_seek.store(target_us, Ordering::Relaxed);
                         dec.audio_flush_gen.fetch_add(1, Ordering::Relaxed);
+                        // Show the target position immediately; hold the scrubber
+                        // there until the decoder catches up.
+                        self.control_bar_state.current_secs = target_secs;
+                        self.seek_target_secs = Some(target_secs);
+                        self.seek_timeout = Some(
+                            std::time::Instant::now()
+                                + std::time::Duration::from_millis(500),
+                        );
                     }
                 }
             }
