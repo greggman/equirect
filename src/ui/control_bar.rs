@@ -41,6 +41,8 @@ pub struct ControlBarActions {
     pub exit: bool,
     /// Seek target in [0, 1] (fraction of duration).
     pub seek_frac: Option<f32>,
+    /// B (right) / Y (left) button just pressed — toggle panel visibility.
+    pub menu_toggle: bool,
 }
 
 /// `just_released` — true on the single frame the controller select button

@@ -8,15 +8,21 @@ pub struct ControllerState {
     pub ray_dir: glam::Vec3,
     /// True while the primary trigger is held.
     pub clicking: bool,
+    /// Thumbstick Y axis (-1 = down, +1 = up).
+    pub thumbstick_y: f32,
+    /// B (right hand) or Y (left hand) button — panel show/hide toggle.
+    pub menu_pressed: bool,
 }
 
 /// Manages OpenXR action sets for both hand controllers.
 pub struct XrInput {
-    pub action_set: xr::ActionSet,
-    pose_action:    xr::Action<xr::Posef>,
-    click_action:   xr::Action<bool>,
-    aim_spaces:     [xr::Space; 2],
-    hand_paths:     [xr::Path; 2],
+    pub action_set:     xr::ActionSet,
+    pose_action:        xr::Action<xr::Posef>,
+    click_action:       xr::Action<bool>,
+    thumbstick_action:  xr::Action<xr::Vector2f>,
+    menu_action:        xr::Action<bool>,
+    aim_spaces:         [xr::Space; 2],
+    hand_paths:         [xr::Path; 2],
 }
 
 impl XrInput {
@@ -45,25 +51,48 @@ impl XrInput {
             .map_err(|e| eprintln!("XR input: create select_click: {e}"))
             .ok()?;
 
+        let thumbstick_action = action_set
+            .create_action::<xr::Vector2f>("thumbstick", "Thumbstick", &hand_paths)
+            .map_err(|e| eprintln!("XR input: create thumbstick: {e}"))
+            .ok()?;
+
+        let menu_action = action_set
+            .create_action::<bool>("menu_toggle", "Menu Toggle", &hand_paths)
+            .map_err(|e| eprintln!("XR input: create menu_toggle: {e}"))
+            .ok()?;
+
         // ── Oculus / Meta Touch controller bindings ────────────────────────
         // A (right) and X (left) are the primary face buttons used for selection.
         if let Ok(profile) = instance
             .string_to_path("/interaction_profiles/oculus/touch_controller")
         {
             let make_path = |s: &str| instance.string_to_path(s).ok();
-            if let (Some(la), Some(ra), Some(lc), Some(rc)) = (
+            if let (
+                Some(la), Some(ra),
+                Some(lc), Some(rc),
+                Some(lt), Some(rt),
+                Some(ly), Some(rb),
+            ) = (
                 make_path("/user/hand/left/input/aim/pose"),
                 make_path("/user/hand/right/input/aim/pose"),
                 make_path("/user/hand/left/input/x/click"),
                 make_path("/user/hand/right/input/a/click"),
+                make_path("/user/hand/left/input/thumbstick"),
+                make_path("/user/hand/right/input/thumbstick"),
+                make_path("/user/hand/left/input/y/click"),
+                make_path("/user/hand/right/input/b/click"),
             ) {
                 let _ = instance.suggest_interaction_profile_bindings(
                     profile,
                     &[
-                        xr::Binding::new(&pose_action,  la),
-                        xr::Binding::new(&pose_action,  ra),
-                        xr::Binding::new(&click_action, lc),
-                        xr::Binding::new(&click_action, rc),
+                        xr::Binding::new(&pose_action,        la),
+                        xr::Binding::new(&pose_action,        ra),
+                        xr::Binding::new(&click_action,       lc),
+                        xr::Binding::new(&click_action,       rc),
+                        xr::Binding::new(&thumbstick_action,  lt),
+                        xr::Binding::new(&thumbstick_action,  rt),
+                        xr::Binding::new(&menu_action,        ly),
+                        xr::Binding::new(&menu_action,        rb),
                     ],
                 );
             }
@@ -109,7 +138,7 @@ impl XrInput {
         ];
 
         println!("XR: controller input ready");
-        Some(Self { action_set, pose_action, click_action, aim_spaces, hand_paths })
+        Some(Self { action_set, pose_action, click_action, thumbstick_action, menu_action, aim_spaces, hand_paths })
     }
 
     /// Sync the action set and return the current state of both controllers.
@@ -150,7 +179,19 @@ impl XrInput {
                 .map(|s| s.current_state && s.is_active)
                 .unwrap_or(false);
 
-            out[i] = Some(ControllerState { ray_origin: pos, ray_dir, clicking });
+            let thumbstick_y = self
+                .thumbstick_action
+                .state(session, hand_path)
+                .map(|s| if s.is_active { s.current_state.y } else { 0.0 })
+                .unwrap_or(0.0);
+
+            let menu_pressed = self
+                .menu_action
+                .state(session, hand_path)
+                .map(|s| s.current_state && s.is_active)
+                .unwrap_or(false);
+
+            out[i] = Some(ControllerState { ray_origin: pos, ray_dir, clicking, thumbstick_y, menu_pressed });
         }
         out
     }

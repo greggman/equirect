@@ -4,6 +4,7 @@ use openxr as xr;
 use crate::input::{ControllerState, XrInput};
 use crate::pointer_renderer::PointerRenderer;
 use crate::renderer::Renderer;
+use crate::ui::browser::{BrowserActions, BrowserState, draw as browser_draw};
 use crate::ui::control_bar::{ControlBarActions, ControlBarState};
 use crate::ui::panel::PanelRenderer;
 use crate::video::texture::VideoTexture;
@@ -229,6 +230,7 @@ pub struct VrContext {
     running: bool,
     pub should_quit: bool,
     frame_count: u64,
+    prev_menu_pressed: bool,
     // Input — NOT ManuallyDrop; dropped explicitly in Drop before the session.
     xr_input: Option<XrInput>,
 }
@@ -442,6 +444,7 @@ impl VrContext {
             running: false,
             should_quit: false,
             frame_count: 0,
+            prev_menu_pressed: false,
             xr_input,
         })
     }
@@ -491,25 +494,25 @@ impl VrContext {
         &mut self,
         renderer:         &Renderer,
         video:            Option<(&VideoRenderer, &VideoTexture)>,
-        mut panel:        Option<&mut PanelRenderer>,
-        panel_state:      Option<&ControlBarState>,
+        mut panel:        Option<(&mut PanelRenderer, &ControlBarState)>,
+        mut browser:      Option<(&mut PanelRenderer, &mut BrowserState)>,
         pointer_renderer: Option<&PointerRenderer>,
-    ) -> ControlBarActions {
+    ) -> (ControlBarActions, BrowserActions) {
         if !self.poll_events() {
-            return ControlBarActions::default();
+            return (ControlBarActions::default(), BrowserActions::default());
         }
 
         let frame_state = match self.frame_waiter.wait() {
             Ok(fs) => fs,
             Err(e) => {
                 eprintln!("XR: frame_waiter.wait failed: {e}");
-                return ControlBarActions::default();
+                return (ControlBarActions::default(), BrowserActions::default());
             }
         };
 
         if let Err(e) = self.frame_stream.begin() {
             eprintln!("XR: frame_stream.begin failed: {e}");
-            return ControlBarActions::default();
+            return (ControlBarActions::default(), BrowserActions::default());
         }
 
         if !frame_state.should_render {
@@ -517,7 +520,7 @@ impl VrContext {
                 .end(frame_state.predicted_display_time, self.blend_mode, &[])
                 .unwrap_or_else(|e| eprintln!("XR: frame_stream.end (no render) failed: {e}"));
             self.frame_count += 1;
-            return ControlBarActions::default();
+            return (ControlBarActions::default(), BrowserActions::default());
         }
 
         // Poll controller input using the frame's predicted display time.
@@ -542,26 +545,41 @@ impl VrContext {
                 self.frame_stream
                     .end(frame_state.predicted_display_time, self.blend_mode, &[])
                     .ok();
-                return ControlBarActions::default();
+                return (ControlBarActions::default(), BrowserActions::default());
             }
         };
 
-        // Update the panel egui texture once (shared by both eyes).
-        let actions = match (panel.as_deref_mut(), panel_state) {
-            (Some(p), Some(s)) => {
-                p.update(&renderer.device, &renderer.queue, s, &controllers)
-            }
-            _ => ControlBarActions::default(),
+        // Edge-detect B/Y menu button across both controllers.
+        let any_menu_now = controllers.iter().flatten().any(|c| c.menu_pressed);
+        let menu_just_pressed = any_menu_now && !self.prev_menu_pressed;
+        self.prev_menu_pressed = any_menu_now;
+
+        // Update the control-bar panel egui texture once (shared by both eyes).
+        let mut cb_actions = match &mut panel {
+            Some((p, s)) => p.update(&renderer.device, &renderer.queue, s, &controllers),
+            None => ControlBarActions::default(),
+        };
+        cb_actions.menu_toggle = menu_just_pressed;
+
+        // Update the browser panel egui texture once (shared by both eyes).
+        let browser_actions = match &mut browser {
+            Some((p, s)) => p.update_ui(
+                &renderer.device, &renderer.queue, &controllers,
+                |ui, just_released| browser_draw(ui, s, just_released),
+            ),
+            None => BrowserActions::default(),
         };
 
-        // Compute where each controller ray hits the panel (for beam truncation).
+        // Compute where each controller ray hits any active panel (for beam truncation).
         let pointer_hits: [Option<glam::Vec3>; 2] = {
             let mut h = [None, None];
-            if let Some(p) = panel.as_deref() {
-                for (i, ctrl) in controllers.iter().enumerate() {
-                    if let Some(ctrl) = ctrl {
-                        h[i] = p.hit_test_3d(ctrl.ray_origin, ctrl.ray_dir);
-                    }
+            for (i, ctrl) in controllers.iter().enumerate() {
+                if let Some(ctrl) = ctrl {
+                    let hit = panel.as_ref()
+                        .and_then(|(p, _)| p.hit_test_3d(ctrl.ray_origin, ctrl.ray_dir))
+                        .or_else(|| browser.as_ref()
+                            .and_then(|(p, _)| p.hit_test_3d(ctrl.ray_origin, ctrl.ray_dir)));
+                    h[i] = hit;
                 }
             }
             h
@@ -581,7 +599,11 @@ impl VrContext {
                 renderer.render_xr_eye(&tex_view, proj, view_mat);
             }
 
-            if let Some(p) = panel.as_deref() {
+            if let Some((p, _)) = &panel {
+                p.render_eye(&tex_view, proj, view_mat, &renderer.device, &renderer.queue);
+            }
+
+            if let Some((p, _)) = &browser {
                 p.render_eye(&tex_view, proj, view_mat, &renderer.device, &renderer.queue);
             }
 
@@ -632,6 +654,6 @@ impl VrContext {
             .unwrap_or_else(|e| eprintln!("XR: frame_stream.end failed: {e}"));
 
         self.frame_count += 1;
-        actions
+        (cb_actions, browser_actions)
     }
 }

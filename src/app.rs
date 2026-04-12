@@ -10,6 +10,14 @@ use winit::{
 
 use crate::pointer_renderer::PointerRenderer;
 use crate::renderer::Renderer;
+use crate::ui::browser::BrowserState;
+
+#[derive(Clone, Copy, PartialEq)]
+enum PanelMode {
+    ControlBar,
+    Browser,
+    Hidden,
+}
 use crate::ui::control_bar::{ControlBarState, SPEEDS};
 use crate::ui::panel::PanelRenderer;
 use crate::video::decoder::VideoDecoder;
@@ -29,6 +37,13 @@ pub struct App {
     pointer_renderer: Option<PointerRenderer>,
     control_bar_state: ControlBarState,
     video_path: Option<PathBuf>,
+    // File browser
+    browser_state: Option<BrowserState>,
+    browser_panel: Option<PanelRenderer>,
+    // Panel visibility
+    panel_mode: PanelMode,
+    /// Which mode to restore when B/Y un-hides; defaults to ControlBar.
+    hidden_from: PanelMode,
 }
 
 impl App {
@@ -43,6 +58,10 @@ impl App {
             pointer_renderer: None,
             control_bar_state: ControlBarState::default(),
             video_path,
+            browser_state: None,
+            browser_panel: None,
+            panel_mode: PanelMode::ControlBar,
+            hidden_from: PanelMode::ControlBar,
         }
     }
 }
@@ -184,13 +203,84 @@ impl ApplicationHandler for App {
             }
 
             let video = self.video_renderer.as_ref().zip(self.video_texture.as_ref());
-            let actions = vr.render_frame(
+
+            // Only pass the panel that should currently be visible.
+            let panel_arg: Option<(&mut PanelRenderer, &ControlBarState)> =
+                if self.panel_mode == PanelMode::ControlBar {
+                    self.panel_renderer.as_mut().map(|p| (p, &self.control_bar_state))
+                } else {
+                    None
+                };
+            let browser_arg: Option<(&mut PanelRenderer, &mut BrowserState)> =
+                if self.panel_mode == PanelMode::Browser {
+                    self.browser_panel.as_mut().zip(self.browser_state.as_mut())
+                } else {
+                    None
+                };
+
+            let (actions, browser_actions) = vr.render_frame(
                 renderer,
                 video,
-                self.panel_renderer.as_mut(),
-                Some(&self.control_bar_state),
+                panel_arg,
+                browser_arg,
                 self.pointer_renderer.as_ref(),
             );
+
+            // ── handle browser actions ─────────────────────────────────────
+
+            if browser_actions.close {
+                self.browser_state = None;
+                self.browser_panel = None;
+                self.panel_mode    = PanelMode::ControlBar;
+            }
+
+            if let Some(dir) = browser_actions.navigate {
+                if let Some(bs) = &mut self.browser_state {
+                    bs.navigate_to(dir);
+                }
+            }
+
+            if let Some(new_path) = browser_actions.play {
+                self.browser_state = None;
+                self.browser_panel = None;
+                self.panel_mode    = PanelMode::Hidden;
+                self.hidden_from   = PanelMode::ControlBar;
+
+                let target_fmt = vr.swapchain_format;
+
+                // Drop old video components before opening the new file.
+                self.video_decoder = None;
+                self.video_texture  = None;
+                self.video_renderer = None;
+
+                match VideoDecoder::open(new_path.clone()) {
+                    Err(e) => eprintln!("Failed to open video: {e}"),
+                    Ok(decoder) => {
+                        let tex = VideoTexture::new(
+                            &renderer.device, decoder.width, decoder.height,
+                        );
+                        let vr_rend = VideoRenderer::new(
+                            &renderer.device, target_fmt,
+                            decoder.width, decoder.height,
+                        );
+                        if let Some(stem) = new_path.file_stem().and_then(|s| s.to_str()) {
+                            self.control_bar_state.video_name = stem.to_owned();
+                        }
+                        if decoder.duration_us > 0 {
+                            self.control_bar_state.duration_secs =
+                                decoder.duration_us as f64 / 1_000_000.0;
+                        } else {
+                            self.control_bar_state.duration_secs = 0.0;
+                        }
+                        self.control_bar_state.current_secs = 0.0;
+                        self.control_bar_state.is_playing    = true;
+                        self.video_path    = Some(new_path);
+                        self.video_decoder = Some(decoder);
+                        self.video_texture = Some(tex);
+                        self.video_renderer = Some(vr_rend);
+                    }
+                }
+            }
 
             // ── handle control bar actions ─────────────────────────────────
 
@@ -252,6 +342,45 @@ impl ApplicationHandler for App {
                         let target_us = (frac as f64 * dec.duration_us as f64) as u64;
                         *dec.seek_request.lock().unwrap() = Some(target_us);
                     }
+                }
+            }
+
+            if actions.show_browser && self.panel_mode != PanelMode::Browser {
+                // Lazily create browser state and panel the first time.
+                if self.browser_state.is_none() {
+                    let start_dir = self.video_path
+                        .as_deref()
+                        .and_then(|p| p.parent())
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+                    let target_fmt = vr.swapchain_format;
+
+                    self.browser_state = Some(BrowserState::new(
+                        start_dir,
+                        self.video_path.clone(),
+                    ));
+                    // 800×600 px canvas displayed at 1.6 m × 1.2 m, centred at eye level.
+                    self.browser_panel = Some(PanelRenderer::new(
+                        &renderer.device,
+                        target_fmt,
+                        800,
+                        600,
+                        glam::Vec3::new(0.0, 1.2, -2.0),
+                        1.6,
+                        1.2,
+                    ));
+                }
+                self.panel_mode = PanelMode::Browser;
+            }
+
+            // ── B / Y button: toggle panel visibility ─────────────────────
+            if actions.menu_toggle {
+                if self.panel_mode != PanelMode::Hidden {
+                    self.hidden_from = self.panel_mode;
+                    self.panel_mode  = PanelMode::Hidden;
+                } else {
+                    self.panel_mode = self.hidden_from;
                 }
             }
 

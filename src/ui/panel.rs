@@ -5,6 +5,9 @@ use wgpu::util::DeviceExt;
 use crate::input::ControllerState;
 use super::control_bar::{ControlBarActions, ControlBarState, draw};
 
+/// Pixels scrolled per frame when the thumbstick is fully deflected.
+const THUMBSTICK_SCROLL_SPEED: f32 = 40.0;
+
 // ── GPU types (identical to video_renderer) ────────────────────────────────
 
 #[repr(C)]
@@ -286,26 +289,32 @@ impl PanelRenderer {
         })
     }
 
-    /// Run the egui control bar and render the result to the offscreen texture.
-    /// Call once per VR frame before any `render_eye` calls.
-    /// Returns any actions the user triggered via the pointer.
-    pub fn update(
+    /// Generic update: runs `draw_fn` inside the egui panel, renders the result
+    /// to the offscreen texture, and returns whatever `draw_fn` returns.
+    ///
+    /// `draw_fn(ui, just_released)` — `just_released` is true on the single frame
+    /// the controller select button went pressed → released while over the panel.
+    pub fn update_ui<T: Default>(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        state: &ControlBarState,
         controllers: &[Option<ControllerState>; 2],
-    ) -> ControlBarActions {
+        draw_fn: impl FnOnce(&mut egui::Ui, bool) -> T,
+    ) -> T {
         // ── Build pointer events from controller hit-tests ─────────────────
         let mut events: Vec<egui::Event> = Vec::new();
         let mut new_pos: Option<egui::Pos2> = None;
         let mut new_clicking = false;
+        let mut thumbstick_y = 0.0_f32;
 
         for ctrl in controllers.iter().flatten() {
             if let Some(hit) = self.hit_test(ctrl.ray_origin, ctrl.ray_dir) {
-                new_pos = Some(hit);
+                new_pos      = Some(hit);
                 new_clicking = ctrl.clicking;
-                break; // first hitting controller wins
+            }
+            // Largest-magnitude thumbstick across both controllers drives scroll.
+            if ctrl.thumbstick_y.abs() > thumbstick_y.abs() {
+                thumbstick_y = ctrl.thumbstick_y;
             }
         }
 
@@ -334,6 +343,16 @@ impl PanelRenderer {
                         modifiers: egui::Modifiers::NONE,
                     });
                 }
+                // Thumbstick scroll — only when the pointer is over the panel so
+                // scroll areas know they're being targeted.
+                if thumbstick_y.abs() > 0.05 {
+                    events.push(egui::Event::MouseWheel {
+                        unit:      egui::MouseWheelUnit::Point,
+                        delta:     egui::Vec2::new(0.0, thumbstick_y * THUMBSTICK_SCROLL_SPEED),
+                        phase:     egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
             }
             (Some(_), None) => {
                 events.push(egui::Event::PointerGone);
@@ -344,7 +363,7 @@ impl PanelRenderer {
         self.cursor_pos    = new_pos;
         self.prev_clicking = new_clicking;
 
-        // ── Run egui ────────────────────────────────���──────────────────────
+        // ── Run egui ──────────────────────────────────────────────────────
         let raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -354,10 +373,11 @@ impl PanelRenderer {
             ..Default::default()
         };
 
-        let mut actions = ControlBarActions::default();
+        let mut result = T::default();
+        // `run_ui` requires FnMut; wrap the FnOnce in an Option so we can `take` it once.
+        let mut draw_fn_opt = Some(draw_fn);
 
         let full_output = self.egui_ctx.run_ui(raw_input, |ctx| {
-            // Dark theme suits VR.
             ctx.set_visuals(egui::Visuals::dark());
 
             #[allow(deprecated)]
@@ -365,12 +385,12 @@ impl PanelRenderer {
                 .frame(
                     egui::Frame::new()
                         .fill(egui::Color32::from_rgba_unmultiplied(15, 15, 15, 220))
-                        // Zero horizontal margin so the slider rail can reach the edges.
-                        // Vertical margin keeps content away from the very top/bottom.
                         .inner_margin(egui::Margin { left: 0, right: 0, top: 6, bottom: 6 }),
                 )
                 .show(ctx, |ui| {
-                    actions = draw(ui, state, just_released);
+                    if let Some(f) = draw_fn_opt.take() {
+                        result = f(ui, just_released);
+                    }
                 });
         });
 
@@ -421,7 +441,20 @@ impl PanelRenderer {
 
         queue.submit([encoder.finish()]);
 
-        actions
+        result
+    }
+
+    /// Convenience wrapper: run the control-bar draw function.
+    pub fn update(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        state: &ControlBarState,
+        controllers: &[Option<ControllerState>; 2],
+    ) -> ControlBarActions {
+        self.update_ui(device, queue, controllers, |ui, just_released| {
+            draw(ui, state, just_released)
+        })
     }
 
     /// Render the panel quad into one XR eye.  Uses `LoadOp::Load` so the video
