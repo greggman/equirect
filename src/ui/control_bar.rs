@@ -56,7 +56,7 @@ pub fn draw(ui: &mut egui::Ui, state: &ControlBarState, just_released: bool) -> 
     // ── icon row ──────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
         ui.style_mut().text_styles.insert(btn_style.clone(), font_id.clone());
-        ui.spacing_mut().button_padding = egui::vec2(12.0, 8.0);
+        ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
 
         // We check `hovered()` instead of `clicked()`: hovered() is exactly
         // what drives the button highlight, and we own the press/release edge.
@@ -105,8 +105,9 @@ pub fn draw(ui: &mut egui::Ui, state: &ControlBarState, just_released: bool) -> 
             0.0
         };
 
-        let resp = ui.add_sized(
-            [ui.available_width(), 24.0],
+        let width = ui.available_width();
+        ui.spacing_mut().slider_width = width;
+        let resp = ui.add(
             egui::Slider::new(&mut frac, 0.0f32..=1.0f32)
                 .show_value(false)
                 .trailing_fill(true),

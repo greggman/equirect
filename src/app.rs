@@ -103,14 +103,17 @@ impl ApplicationHandler for App {
             }
         }
 
+        // Panel: original 800×160 px canvas, displayed at 2× the original physical size
+        // (2.0 m wide × 0.4 m tall) so everything inside appears 2× larger.
+        // Centered at Y=0.0, just below the video whose bottom sits near Y=0.
         self.panel_renderer = Some(PanelRenderer::new(
             &renderer.device,
             target_fmt,
             800,
             160,
-            glam::Vec3::new(0.0, -0.8, -2.0),
-            1.0,
-            0.2,
+            glam::Vec3::new(0.0, 0.0, -2.0),
+            2.0,
+            0.4,
         ));
 
         self.pointer_renderer = Some(PointerRenderer::new(&renderer.device, target_fmt));

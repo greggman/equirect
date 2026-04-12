@@ -21,18 +21,21 @@ struct Vertex {
 }
 
 fn build_quad(aspect: f32) -> [Vertex; 6] {
-    // A flat quad 3.2 m wide, positioned 2.5 m in front of the origin.
-    // Y-up, -Z forward (OpenXR stage space convention).
+    // A flat quad 3.2 m wide, 2.5 m in front of the origin.
+    // Y-up, -Z forward (OpenXR stage space).
+    // Centered at eye level: cy = hh so that the vertical midpoint sits at
+    // approximately standing eye height above the stage floor.
     let hw = 1.6_f32;
     let hh = hw / aspect;
-    let z = -2.5_f32;
+    let cy = hh;      // shift up so center is at eye level
+    let z  = -2.5_f32;
     [
-        Vertex { position: [-hw,  hh, z], uv: [0.0, 0.0] },
-        Vertex { position: [-hw, -hh, z], uv: [0.0, 1.0] },
-        Vertex { position: [ hw,  hh, z], uv: [1.0, 0.0] },
-        Vertex { position: [ hw,  hh, z], uv: [1.0, 0.0] },
-        Vertex { position: [-hw, -hh, z], uv: [0.0, 1.0] },
-        Vertex { position: [ hw, -hh, z], uv: [1.0, 1.0] },
+        Vertex { position: [-hw, cy + hh, z], uv: [0.0, 0.0] },
+        Vertex { position: [-hw, cy - hh, z], uv: [0.0, 1.0] },
+        Vertex { position: [ hw, cy + hh, z], uv: [1.0, 0.0] },
+        Vertex { position: [ hw, cy + hh, z], uv: [1.0, 0.0] },
+        Vertex { position: [-hw, cy - hh, z], uv: [0.0, 1.0] },
+        Vertex { position: [ hw, cy - hh, z], uv: [1.0, 1.0] },
     ]
 }
 
