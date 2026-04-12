@@ -13,7 +13,7 @@ pub struct VideoMeta {
 }
 
 fn meta_path(video_path: &Path) -> Option<std::path::PathBuf> {
-    let dirs = ProjectDirs::from("", "", "vrust-v")?;
+    let dirs = ProjectDirs::from("", "", "equirect")?;
     let canonical = video_path.canonicalize().ok()
         .unwrap_or_else(|| video_path.to_path_buf());
     let hash = format!("{:x}", Sha256::digest(canonical.to_string_lossy().as_bytes()));
@@ -48,7 +48,7 @@ struct AppState {
 }
 
 fn config_dir() -> Option<PathBuf> {
-    Some(ProjectDirs::from("", "", "vrust-v")?.config_dir().to_path_buf())
+    Some(ProjectDirs::from("", "", "equirect")?.config_dir().to_path_buf())
 }
 
 fn state_path() -> Option<PathBuf> {

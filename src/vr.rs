@@ -205,9 +205,9 @@ impl VrPreInit {
         let instance = xr_entry
             .create_instance(
                 &xr::ApplicationInfo {
-                    application_name: "vrust-v",
+                    application_name: "equirect",
                     application_version: 1,
-                    engine_name: "vrust-v",
+                    engine_name: "equirect",
                     engine_version: 1,
                     api_version: xr::Version::new(1, 0, 0),
                 },

@@ -126,7 +126,7 @@ impl ApplicationHandler for App {
 
         let window = Arc::new(
             event_loop
-                .create_window(Window::default_attributes().with_title("vrust-v"))
+                .create_window(Window::default_attributes().with_title("equirect"))
                 .expect("Failed to create window"),
         );
 

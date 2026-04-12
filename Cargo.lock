@@ -679,6 +679,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e3b85a2bb775a3ab02d077a65cc31575c11b2584581913253cc11ce49f48bba"
 
 [[package]]
+name = "equirect"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ash",
+ "bytemuck",
+ "cpal",
+ "directories",
+ "egui",
+ "egui-wgpu",
+ "glam",
+ "openxr",
+ "pollster",
+ "serde",
+ "serde_json",
+ "sha2",
+ "wgpu",
+ "windows 0.61.3",
+ "winit",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2358,28 +2380,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vrust-v"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ash",
- "bytemuck",
- "cpal",
- "directories",
- "egui",
- "egui-wgpu",
- "glam",
- "openxr",
- "pollster",
- "serde",
- "serde_json",
- "sha2",
- "wgpu",
- "windows 0.61.3",
- "winit",
-]
 
 [[package]]
 name = "walkdir"
