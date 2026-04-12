@@ -487,6 +487,20 @@ impl ApplicationHandler for App {
                 }
             }
 
+            if let Some(delta_secs) = actions.seek_delta_secs {
+                if let Some(dec) = &self.video_decoder {
+                    if dec.duration_us > 0 {
+                        let duration_secs = dec.duration_us as f64 / 1_000_000.0;
+                        let current_secs  = dec.current_pts_us.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+                        let target_secs   = (current_secs + delta_secs).rem_euclid(duration_secs);
+                        let target_us     = (target_secs * 1_000_000.0) as u64;
+                        *dec.seek_request.lock().unwrap() = Some(target_us);
+                        dec.audio_seek.store(target_us, Ordering::Relaxed);
+                        dec.audio_flush_gen.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+
             // ── prev / next video ──────────────────────────────────────────
             let nav_delta: Option<i32> = if actions.prev { Some(-1) }
                 else if actions.next { Some(1) }

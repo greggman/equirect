@@ -283,6 +283,7 @@ pub struct VrContext {
     frame_count: u64,
     prev_menu_pressed: bool,
     prev_grip_pressed: bool,
+    last_seek_time: Option<std::time::Instant>,
     /// Base orientation applied to all video layers.
     /// At startup this is a yaw-only rotation so the video faces the user
     /// regardless of where they happen to be looking vertically.
@@ -514,6 +515,7 @@ impl VrContext {
             frame_count: 0,
             prev_menu_pressed: false,
             prev_grip_pressed: false,
+            last_seek_time: None,
             base_orientation: glam::Quat::IDENTITY,
             orientation_initialized: false,
             xr_input,
@@ -665,6 +667,13 @@ impl VrContext {
         let menu_just_pressed = any_menu_now && !self.prev_menu_pressed;
         self.prev_menu_pressed = any_menu_now;
 
+        // Thumbstick X → seek ±10 s, throttled to at most once per 100 ms.
+        // Use the largest-magnitude X value across both controllers.
+        let thumb_x = controllers.iter().flatten()
+            .map(|c| c.thumbstick_x)
+            .max_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or(0.0);
+
         // Build controller rays in the panel's local frame (inverse of base_orientation).
         // Panels live at (0, y, -2) in local space; base_orientation rotates that frame
         // into stage space.  Hit-testing and egui input both need local-frame rays.
@@ -688,6 +697,25 @@ impl VrContext {
             None => ControlBarActions::default(),
         };
         cb_actions.menu_toggle = menu_just_pressed;
+
+        // Emit a seek delta when the thumbstick X is past the dead zone and
+        // at least 100 ms have elapsed since the last seek emission.
+        const SEEK_DEAD_ZONE: f32 = 0.2;
+        const SEEK_INTERVAL:  std::time::Duration = std::time::Duration::from_millis(100);
+        if thumb_x.abs() > SEEK_DEAD_ZONE {
+            let now = std::time::Instant::now();
+            let due = self.last_seek_time
+                .map(|t| now.duration_since(t) >= SEEK_INTERVAL)
+                .unwrap_or(true);
+            if due {
+                self.last_seek_time = Some(now);
+                cb_actions.seek_delta_secs = Some(thumb_x as f64 * 10.0);
+            }
+        } else {
+            // Reset the throttle when the stick returns to centre so the next
+            // deflection fires immediately rather than waiting out the interval.
+            self.last_seek_time = None;
+        }
 
         // Update the browser panel egui texture once (shared by both eyes).
         let browser_actions = match &mut browser {

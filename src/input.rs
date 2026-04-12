@@ -9,6 +9,8 @@ pub struct ControllerState {
     pub ray_dir: glam::Vec3,
     /// True while the primary trigger is held.
     pub clicking: bool,
+    /// Thumbstick X axis (-1 = left, +1 = right).
+    pub thumbstick_x: f32,
     /// Thumbstick Y axis (-1 = down, +1 = up).
     pub thumbstick_y: f32,
     /// B (right hand) or Y (left hand) button — panel show/hide toggle.
@@ -193,11 +195,13 @@ impl XrInput {
                 .map(|s| s.current_state && s.is_active)
                 .unwrap_or(false);
 
-            let thumbstick_y = self
+            let thumbstick_xy = self
                 .thumbstick_action
                 .state(session, hand_path)
-                .map(|s| if s.is_active { s.current_state.y } else { 0.0 })
-                .unwrap_or(0.0);
+                .map(|s| if s.is_active { (s.current_state.x, s.current_state.y) } else { (0.0, 0.0) })
+                .unwrap_or((0.0, 0.0));
+            let thumbstick_x = thumbstick_xy.0;
+            let thumbstick_y = thumbstick_xy.1;
 
             let menu_pressed = self
                 .menu_action
@@ -211,7 +215,7 @@ impl XrInput {
                 .map(|s| s.current_state && s.is_active)
                 .unwrap_or(false);
 
-            out[i] = Some(ControllerState { ray_origin: pos, ray_dir, clicking, thumbstick_y, menu_pressed, grip_pressed });
+            out[i] = Some(ControllerState { ray_origin: pos, ray_dir, clicking, thumbstick_x, thumbstick_y, menu_pressed, grip_pressed });
         }
         out
     }
