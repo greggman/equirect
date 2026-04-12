@@ -1,5 +1,5 @@
 /// Video geometry mode.
-#[derive(Clone, Copy, PartialEq, Default, Debug)]
+#[derive(Clone, Copy, PartialEq, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub enum VideoMode {
     #[default]
     Flat2D,
@@ -10,7 +10,7 @@ pub enum VideoMode {
 }
 
 /// Projection type (only meaningful for 180 / 360).
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Projection {
     #[default]
     Equirect,
@@ -18,7 +18,7 @@ pub enum Projection {
 }
 
 /// Stereo layout (meaningful for 3D / 180 / 360).
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum StereoLayout {
     #[default]
     OneView,
@@ -29,7 +29,7 @@ pub enum StereoLayout {
 }
 
 /// Persistent settings that affect how the video is rendered.
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VideoSettings {
     pub mode:   VideoMode,
     pub proj:   Projection,

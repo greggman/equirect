@@ -13,6 +13,7 @@ use crate::renderer::Renderer;
 use crate::ui::browser::BrowserState;
 use crate::ui::settings::VideoSettings;
 use crate::video_layer::{VideoSwapchain, use_xr_layer};
+use crate::video_meta;
 
 #[derive(Clone, Copy, PartialEq)]
 enum PanelMode {
@@ -104,6 +105,10 @@ impl ApplicationHandler for App {
             .unwrap_or_else(|| renderer.surface_format());
 
         if let Some(ref path) = self.video_path {
+            // Restore per-video settings before opening.
+            if let Some(meta) = video_meta::load(path) {
+                self.video_settings = meta.settings;
+            }
             match VideoDecoder::open(path.clone()) {
                 Err(e) => eprintln!("Failed to open video: {e}"),
                 Ok(decoder) => {
@@ -292,6 +297,11 @@ impl ApplicationHandler for App {
 
                 let target_fmt = vr.swapchain_format;
 
+                // Restore saved settings for the new video (or reset to defaults).
+                self.video_settings = video_meta::load(&new_path)
+                    .map(|m| m.settings)
+                    .unwrap_or_else(VideoSettings::new);
+
                 // Drop old video components before opening the new file.
                 self.video_swapchain = None;
                 self.video_decoder   = None;
@@ -332,6 +342,14 @@ impl ApplicationHandler for App {
             }
 
             // ── handle settings actions ────────────────────────────────────
+
+            if settings_actions.changed {
+                if let Some(ref path) = self.video_path {
+                    video_meta::save(path, &video_meta::VideoMeta {
+                        settings: self.video_settings.clone(),
+                    });
+                }
+            }
 
             if settings_actions.close {
                 self.panel_mode = PanelMode::ControlBar;

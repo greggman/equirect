@@ -5,6 +5,7 @@ mod renderer;
 mod ui;
 mod video;
 mod video_layer;
+mod video_meta;
 mod video_renderer;
 mod vr;
 
