@@ -46,6 +46,8 @@ pub struct App {
     // File browser
     browser_state: Option<BrowserState>,
     browser_panel: Option<PanelRenderer>,
+    /// Directory to show in the browser at startup; consumed on first use.
+    initial_browser_dir: Option<PathBuf>,
     // Settings
     video_settings: VideoSettings,
     settings_panel: Option<PanelRenderer>,
@@ -56,7 +58,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(video_path: Option<PathBuf>) -> Self {
+    pub fn new(video_path: Option<PathBuf>, initial_browser_dir: Option<PathBuf>) -> Self {
+        // If we have an initial browser dir but no video, start with the browser open.
+        let panel_mode = if video_path.is_none() && initial_browser_dir.is_some() {
+            PanelMode::Browser
+        } else {
+            PanelMode::ControlBar
+        };
         Self {
             vr: None,
             renderer: None,
@@ -70,9 +78,10 @@ impl App {
             video_path,
             browser_state: None,
             browser_panel: None,
+            initial_browser_dir,
             video_settings: VideoSettings::new(),
             settings_panel: None,
-            panel_mode: PanelMode::ControlBar,
+            panel_mode,
             hidden_from: PanelMode::ControlBar,
         }
     }
@@ -156,6 +165,20 @@ impl ApplicationHandler for App {
         ));
 
         self.pointer_renderer = Some(PointerRenderer::new(&renderer.device, target_fmt));
+
+        // If an initial browser directory was provided, create the browser panel now.
+        if let Some(dir) = self.initial_browser_dir.take() {
+            self.browser_state = Some(BrowserState::new(dir, self.video_path.clone()));
+            self.browser_panel = Some(PanelRenderer::new(
+                &renderer.device,
+                target_fmt,
+                800,
+                600,
+                glam::Vec3::new(0.0, 1.2, -2.0),
+                1.6,
+                1.2,
+            ));
+        }
 
         self.renderer = Some(renderer);
         self.vr = vr;
@@ -285,12 +308,17 @@ impl ApplicationHandler for App {
             }
 
             if let Some(dir) = browser_actions.navigate {
+                video_meta::save_last_dir(&dir);
                 if let Some(bs) = &mut self.browser_state {
                     bs.navigate_to(dir);
                 }
             }
 
             if let Some(new_path) = browser_actions.play {
+                // Save the folder this video lives in as the last browsed dir.
+                if let Some(parent) = new_path.parent() {
+                    video_meta::save_last_dir(parent);
+                }
                 self.browser_state = None;
                 self.browser_panel = None;
                 self.panel_mode    = PanelMode::Hidden;
