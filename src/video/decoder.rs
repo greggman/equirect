@@ -57,9 +57,21 @@ pub struct VideoDecoder {
     pub audio_flush_gen: Arc<AtomicU64>,
     pub width: u32,
     pub height: u32,
-    _thread: thread::JoinHandle<()>,
-    _audio_thread: thread::JoinHandle<()>,
+    /// Set to `true` to signal both decode threads to exit.
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+    audio_thread: Option<thread::JoinHandle<()>>,
     _audio_player: Option<crate::audio::AudioPlayer>,
+}
+
+impl Drop for VideoDecoder {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        // Unblock the audio channel if the audio thread is sleeping on a full send.
+        // (The video thread checks stop at the top of every loop iteration.)
+        if let Some(h) = self.thread.take()       { let _ = h.join(); }
+        if let Some(h) = self.audio_thread.take() { let _ = h.join(); }
+    }
 }
 
 impl VideoDecoder {
@@ -77,6 +89,7 @@ impl VideoDecoder {
         let seek_request    = Arc::new(Mutex::new(None::<u64>));
         let audio_seek      = Arc::new(AtomicU64::new(u64::MAX));
         let audio_flush_gen = Arc::new(AtomicU64::new(0));
+        let stop            = Arc::new(AtomicBool::new(false));
 
         // Bounded channel: ~2 seconds of float32 stereo audio at 48 kHz.
         let (audio_tx, audio_rx) =
@@ -98,6 +111,8 @@ impl VideoDecoder {
         let audio_speed     = Arc::clone(&speed_index);
         let audio_seek_c    = Arc::clone(&audio_seek);
         let audio_flush_c   = Arc::clone(&audio_flush_gen);
+        let stop_video      = Arc::clone(&stop);
+        let stop_audio      = Arc::clone(&stop);
 
         let handle = thread::Builder::new()
             .name("video-decode".into())
@@ -105,7 +120,7 @@ impl VideoDecoder {
                 decode_thread(
                     path, init_tx, latest_clone,
                     pts_c, pau_c, spd_c,
-                    lps_c, lps_start_c, lps_end_c, seek_c,
+                    lps_c, lps_start_c, lps_end_c, seek_c, stop_video,
                 )
             })?;
 
@@ -114,7 +129,7 @@ impl VideoDecoder {
             .spawn(move || {
                 audio_decode_thread(
                     audio_path, audio_fmt_tx, audio_tx,
-                    audio_paused, audio_speed, audio_seek_c, audio_flush_c,
+                    audio_paused, audio_speed, audio_seek_c, audio_flush_c, stop_audio,
                 )
             })?;
 
@@ -151,8 +166,9 @@ impl VideoDecoder {
             audio_flush_gen,
             width,
             height,
-            _thread: handle,
-            _audio_thread: audio_handle,
+            stop,
+            thread: Some(handle),
+            audio_thread: Some(audio_handle),
             _audio_player: audio_player,
         })
     }
@@ -178,6 +194,7 @@ fn decode_thread(
     loop_start_us:   Arc<AtomicU64>,
     loop_end_us:     Arc<AtomicU64>,
     seek_request:    Arc<Mutex<Option<u64>>>,
+    stop:            Arc<AtomicBool>,
 ) {
     use windows::Win32::Media::MediaFoundation::*;
     use windows::Win32::System::Com::*;
@@ -197,7 +214,7 @@ fn decode_thread(
         match open_and_decode(
             path, init_tx, &latest,
             &current_pts_us, &paused, &speed_index,
-            &loop_state, &loop_start_us, &loop_end_us, &seek_request,
+            &loop_state, &loop_start_us, &loop_end_us, &seek_request, &stop,
         ) {
             Ok(()) => {}
             Err(e) => eprintln!("Video decoder error: {e}"),
@@ -341,6 +358,7 @@ fn open_and_decode(
     loop_start_us:   &Arc<AtomicU64>,
     loop_end_us:     &Arc<AtomicU64>,
     seek_request:    &Arc<Mutex<Option<u64>>>,
+    stop:            &Arc<AtomicBool>,
 ) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Media::MediaFoundation::*;
@@ -432,6 +450,11 @@ fn open_and_decode(
     let mut seek_until_us: Option<u64> = None;
 
     'decode: loop {
+        // ── stop signal ───────────────────────────────────────────────────
+        if stop.load(Ordering::Relaxed) {
+            break 'decode;
+        }
+
         // ── seek request ───────────────────────────────────────────────────
         {
             let target = seek_request.lock().unwrap().take();
@@ -721,6 +744,7 @@ fn audio_decode_thread(
     speed_index: Arc<AtomicU32>,
     audio_seek: Arc<AtomicU64>,
     audio_flush_gen: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
 ) {
     use windows::Win32::Media::MediaFoundation::*;
     use windows::Win32::System::Com::*;
@@ -736,7 +760,7 @@ fn audio_decode_thread(
         }
         match open_and_decode_audio(
             path, &format_tx, &producer,
-            &paused, &speed_index, &audio_seek, &audio_flush_gen,
+            &paused, &speed_index, &audio_seek, &audio_flush_gen, &stop,
         ) {
             Ok(()) => {}
             Err(e) => eprintln!("Audio decoder error: {e}"),
@@ -754,6 +778,7 @@ fn open_and_decode_audio(
     _speed_index: &Arc<AtomicU32>,
     audio_seek: &Arc<AtomicU64>,
     _audio_flush_gen: &Arc<AtomicU64>,
+    stop: &Arc<AtomicBool>,
 ) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Media::MediaFoundation::*;
@@ -806,6 +831,10 @@ fn open_and_decode_audio(
     let _ = format_tx.send(Some((sample_rate, channels)));
 
     loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+
         // Handle seek request from the main thread.
         let seek_us = audio_seek.load(Ordering::Relaxed);
         if seek_us != NO_SEEK
@@ -853,8 +882,10 @@ fn open_and_decode_audio(
 
         // Push all floats into the channel, yielding when it is full.
         for &sample in floats.iter() {
-            // Abort if a seek arrives — don't fill the channel with stale audio.
-            if audio_seek.load(Ordering::Relaxed) != NO_SEEK {
+            // Abort if a seek or stop arrives — don't fill the channel with stale audio.
+            if audio_seek.load(Ordering::Relaxed) != NO_SEEK
+                || stop.load(Ordering::Relaxed)
+            {
                 break;
             }
             // Block-send: parks this thread until there is room.
