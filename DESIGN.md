@@ -42,13 +42,21 @@ Features:
 
 [*] Listing
 
+  +------------------------+
+  |[V][current path    ][X]|  V = volumes icon
+  +------------------------+  X = close
+  | file 1               |S|  S = scrollbar
+  | file 2               | |
+  | file 3               | |
+  | file 4               | |
+  +----------------------+-+
+
   [*] shows list of videos with a scroll bar
   [*] controller stick scrolls as well
   [*] lets you select a video or a folder
     [*] selecting a video plays the video
     [*] selecting a folder goes to that folder
     [*] shows ".." folder for going up to the parent folder
-    [ ] at top level shows volumes/drives
 
 [*] App shows 2 long pointers, one for each hand, with a mark on where they are touching
   the panel. Pressing the 2nd (y, b) shows/hides the current panel. Then no panel is visible
@@ -73,11 +81,11 @@ Features:
   [ ] folders
   [ ] webdav
   [ ] http
-[ ] have button to select roots on listing panel
+[*] have button to select roots on listing panel
 [*] if arg is folder start on listing at folder
 [*] if no arg start on last folder - if error or last folder start on user's home (directories)
 [*] make Y/B exit listing and settings.
-[ ] better icons
+[*] better icons
 [ ] handle unicode fonts
 [*] make it handle 8x video
 [ ] make audio work when not 1x
@@ -86,6 +94,7 @@ Features:
 [*] fix listing, que, mouse capture for slider
 [*] no warnings
 [*] debug log
+[ ] second pointer doesn't work
 
 [ ] Make it run on Quest - add SMB support
   [ ] need settings to have way to add "roots" where each root is a SMB or webdav or HTTP
