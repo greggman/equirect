@@ -146,7 +146,7 @@ impl ApplicationHandler for App {
             match VideoDecoder::open(path.clone()) {
                 Err(e) => eprintln!("Failed to open video: {e}"),
                 Ok(decoder) => {
-                    let tex = VideoTexture::new(&renderer.device, decoder.width, decoder.height);
+                    let tex = VideoTexture::new(&renderer.device, decoder.width, decoder.height, decoder.is_nv12);
                     // VideoRenderer is only used for the fisheye shader fallback.
                     let vr_rend = VideoRenderer::new(
                         &renderer.device,
@@ -247,13 +247,13 @@ impl ApplicationHandler for App {
         // Upload the latest decoded frame if one is available.
         if let (Some(decoder), Some(texture)) = (&self.video_decoder, &self.video_texture) {
             if let Some(frame) = decoder.take_frame() {
-                texture.upload(&renderer.queue, &frame.data);
+                texture.upload(&renderer.queue, &frame);
                 // Rebind texture in both the shader renderer and the swapchain blit.
                 if let Some(vr_rend) = &mut self.video_renderer {
                     vr_rend.set_texture(&renderer.device, texture);
                 }
                 if let Some(sc) = &mut self.video_swapchain {
-                    sc.set_texture(&renderer.device, texture);
+                    sc.set_texture(&renderer.device, &renderer.queue, texture);
                 }
             }
             let pts_us = decoder.current_pts_us.load(Ordering::Relaxed);
@@ -378,7 +378,7 @@ impl ApplicationHandler for App {
                     Err(e) => eprintln!("Failed to open video: {e}"),
                     Ok(decoder) => {
                         let tex = VideoTexture::new(
-                            &renderer.device, decoder.width, decoder.height,
+                            &renderer.device, decoder.width, decoder.height, decoder.is_nv12,
                         );
                         let vr_rend = VideoRenderer::new(
                             &renderer.device, target_fmt,
@@ -531,7 +531,7 @@ impl ApplicationHandler for App {
                         Err(e) => eprintln!("Failed to open video: {e}"),
                         Ok(decoder) => {
                             let tex = crate::video::texture::VideoTexture::new(
-                                &renderer.device, decoder.width, decoder.height,
+                                &renderer.device, decoder.width, decoder.height, decoder.is_nv12,
                             );
                             let vr_rend = crate::video_renderer::VideoRenderer::new(
                                 &renderer.device, target_fmt,

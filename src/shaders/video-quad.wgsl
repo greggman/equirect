@@ -9,19 +9,21 @@ struct Camera {
 
 @group(1) @binding(0) var video_texture: texture_2d<f32>;
 @group(1) @binding(1) var video_sampler: sampler;
+@group(1) @binding(2) var uv_texture:    texture_2d<f32>;  // NV12 chroma (UV) plane
 
 struct VideoParams {
-    uv_offset: vec2f,  // stereo crop origin  (applied to final UV for modes 1-4)
-    uv_scale:  vec2f,  // stereo crop scale   (applied to final UV for modes 1-4)
+    uv_offset: vec2f,  // stereo crop origin
+    uv_scale:  vec2f,  // stereo crop scale
     // 0 = flat pass-through (vertex UV, only used when no XR layer)
     // 1 = fisheye 180°
     // 2 = dual-fisheye 360°
     // 3 = equirect 180°
     // 4 = equirect 360°
-    mode:     u32,
-    inv_zoom: f32,  // 1/zoom — scales the unprojected view direction for modes 1-4
-    _pad0:    u32,
-    _pad1:    u32,
+    mode:      u32,
+    inv_zoom:  f32,    // 1/zoom
+    // 0 = BGRA texture, 1 = NV12 (Y in video_texture, UV in uv_texture)
+    pixel_fmt: u32,
+    _pad0:     u32,
 }
 @group(2) @binding(0) var<uniform> params: VideoParams;
 
@@ -64,25 +66,48 @@ const PI: f32 = 3.14159265358979323846;
 /// Reconstruct the world-space unit direction for a fragment at clip-space position
 /// `clip_xy`.  Uses the camera projection to unproject to view space, then the
 /// rotation part of the view matrix (translation ignored) to reach world space.
-/// `params.inv_zoom` narrows the cone (1/zoom > 1 → zoomed in).
 fn world_dir(clip_xy: vec2f) -> vec3f {
     let P = camera.projection;
-    // Unproject clip position to view-space ray direction.
-    // We intentionally ignore P[2][0]/P[2][1] (the asymmetric frustum offset) so that
-    // the viewport centre (NDC 0,0) always maps to the forward axis.  Using the full
-    // offset shifts the video centre away from the optical axis by 5-10° per eye.
     let raw = vec3f(
         clip_xy.x / P[0][0] * params.inv_zoom,
         clip_xy.y / P[1][1] * params.inv_zoom,
         -1.0,
     );
-    // Rotate from view space to world space: R^{-1} = transpose of view's 3×3 block.
     let R_inv = transpose(mat3x3f(
         camera.view[0].xyz,
         camera.view[1].xyz,
         camera.view[2].xyz,
     ));
     return normalize(R_inv * raw);
+}
+
+/// sRGB EOTF: gamma-compressed video value → linear light.
+/// Applied after YCbCr conversion so the output matches what Bgra8UnormSrgb
+/// texture sampling would produce (linear values for an sRGB render target).
+fn srgb_to_linear(x: f32) -> f32 {
+    return select(x / 12.92, pow((x + 0.055) / 1.055, 2.4), x > 0.04045);
+}
+
+/// BT.709 studio-swing YCbCr → linear RGBA.
+/// Y  is sampled from `video_texture` (R8Unorm).
+/// UV is sampled from `uv_texture`   (Rg8Unorm, R=Cb, G=Cr).
+/// Output is linearised so writing to an sRGB render target is correct.
+fn nv12_to_rgba(uv: vec2f) -> vec4f {
+    let y_raw  = textureSample(video_texture, video_sampler, uv).r * 255.0;
+    let uv_raw = textureSample(uv_texture,    video_sampler, uv).rg * 255.0;
+    let yp = y_raw    - 16.0;
+    let cb = uv_raw.r - 128.0;
+    let cr = uv_raw.g - 128.0;
+    // BT.709 integer formula scaled to [0,1]: divide by 256*255 = 65280.
+    let r = (298.0 * yp + 459.0 * cr + 128.0) / 65280.0;
+    let g = (298.0 * yp -  55.0 * cb - 136.0 * cr + 128.0) / 65280.0;
+    let b = (298.0 * yp + 541.0 * cb + 128.0) / 65280.0;
+    return vec4f(
+        srgb_to_linear(clamp(r, 0.0, 1.0)),
+        srgb_to_linear(clamp(g, 0.0, 1.0)),
+        srgb_to_linear(clamp(b, 0.0, 1.0)),
+        1.0,
+    );
 }
 
 @fragment fn fs_main(in: VertexOut) -> @location(0) vec4f {
@@ -115,7 +140,7 @@ fn world_dir(clip_xy: vec2f) -> vec3f {
     } else if params.mode == 3u {
         // ── Equirect 180° ─────────────────────────────────────────────────
         let d  = world_dir(in.uv);
-        is_outside = d.z >= 0.0;   // back hemisphere → black
+        is_outside = d.z >= 0.0;
         uv = vec2f(
             atan2(d.x, -d.z) / PI + 0.5,
             0.5 - asin(clamp(d.y, -1.0, 1.0)) / PI,
@@ -134,9 +159,10 @@ fn world_dir(clip_xy: vec2f) -> vec3f {
         uv = in.uv;
     }
 
-    // Apply stereo crop and then sample.  textureSample must be in uniform
-    // control flow so it is always called unconditionally.
-    let final_uv = params.uv_offset + uv * params.uv_scale;
-    let colour   = textureSample(video_texture, video_sampler, final_uv);
+    // Apply stereo crop.  Both texture samples must be in uniform control flow.
+    let final_uv  = params.uv_offset + uv * params.uv_scale;
+    let bgra_col  = textureSample(video_texture, video_sampler, final_uv);
+    let nv12_col  = nv12_to_rgba(final_uv);
+    let colour    = select(bgra_col, nv12_col, params.pixel_fmt == 1u);
     return select(colour, vec4f(0.0, 0.0, 0.0, 1.0), is_outside);
 }

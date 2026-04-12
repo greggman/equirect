@@ -9,20 +9,38 @@ use anyhow::{anyhow, Result};
 // Speed table (must match ui::control_bar::SPEEDS).
 const SPEEDS: [f32; 5] = [1.0, 2.0 / 3.0, 0.5, 1.0 / 3.0, 0.25];
 
-/// A decoded video frame — always BGRA, tightly packed, `width × height × 4` bytes.
+/// Pixel format carried by a `VideoFrame`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum VideoFormat {
+    /// Tightly packed BGRA, `width × height × 4` bytes.
+    Bgra,
+    /// Raw NV12 from the decoder.
+    /// `stride`    – bytes per row (≥ width, due to decoder alignment padding).
+    /// `uv_offset` – byte offset from `data[0]` to the first UV byte.
+    ///               This is `coded_height × stride`, which may be larger than
+    ///               `display_height × stride` when the codec pads height to a
+    ///               block boundary (e.g. H.264 pads 1080 → 1088).
+    Nv12 { stride: usize, uv_offset: usize },
+}
+
+/// A decoded video frame.
 #[derive(Clone)]
 pub struct VideoFrame {
-    pub data: Vec<u8>,
+    pub data:   Vec<u8>,
+    pub format: VideoFormat,
 }
 
 /// Opens a video file and decodes it on a background thread via Windows Media Foundation.
-/// The latest decoded frame (always BGRA) is available via `take_frame()`.
+/// The latest decoded frame is available via `take_frame()`.
 pub struct VideoDecoder {
     latest: Arc<Mutex<Option<VideoFrame>>>,
     /// Current presentation timestamp in microseconds, updated by the decode thread.
     pub current_pts_us: Arc<AtomicU64>,
     /// Duration of the video in microseconds (0 if not known).
     pub duration_us: u64,
+    /// True when the decoder outputs NV12 frames (GPU colour conversion).
+    /// False when it outputs BGRA (already converted on the CPU).
+    pub is_nv12: bool,
     /// When `true` the decode thread pauses between frames.
     pub paused: Arc<AtomicBool>,
     /// Index into `SPEEDS` (0 = 1×, 4 = ¼×).
@@ -46,7 +64,8 @@ pub struct VideoDecoder {
 
 impl VideoDecoder {
     pub fn open(path: PathBuf) -> Result<Self> {
-        let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(u32, u32, u64)>>();
+        // init message: (width, height, duration_us, is_nv12)
+        let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(u32, u32, u64, bool)>>();
         let latest: Arc<Mutex<Option<VideoFrame>>> = Arc::new(Mutex::new(None));
         let latest_clone = Arc::clone(&latest);
         let current_pts_us  = Arc::new(AtomicU64::new(0));
@@ -99,7 +118,7 @@ impl VideoDecoder {
                 )
             })?;
 
-        let (width, height, duration_us) = init_rx
+        let (width, height, duration_us, is_nv12) = init_rx
             .recv()
             .map_err(|_| anyhow!("Decoder thread exited before sending init result"))??;
 
@@ -121,6 +140,7 @@ impl VideoDecoder {
             latest,
             current_pts_us,
             duration_us,
+            is_nv12,
             paused,
             speed_index,
             loop_state,
@@ -149,7 +169,7 @@ impl VideoDecoder {
 #[allow(clippy::too_many_arguments)]
 fn decode_thread(
     path: PathBuf,
-    init_tx: std::sync::mpsc::Sender<Result<(u32, u32, u64)>>,
+    init_tx: std::sync::mpsc::Sender<Result<(u32, u32, u64, bool)>>,
     latest: Arc<Mutex<Option<VideoFrame>>>,
     current_pts_us:  Arc<AtomicU64>,
     paused:          Arc<AtomicBool>,
@@ -259,7 +279,7 @@ unsafe fn query_duration_us(
 #[allow(clippy::too_many_arguments)]
 fn open_and_decode(
     path: PathBuf,
-    init_tx: std::sync::mpsc::Sender<Result<(u32, u32, u64)>>,
+    init_tx: std::sync::mpsc::Sender<Result<(u32, u32, u64, bool)>>,
     latest: &Arc<Mutex<Option<VideoFrame>>>,
     current_pts_us:  &Arc<AtomicU64>,
     paused:          &Arc<AtomicBool>,
@@ -279,12 +299,20 @@ fn open_and_decode(
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0u16]).collect();
     let url = PCWSTR(wide.as_ptr());
 
+    // MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS: prefer DXVA2/D3D11VA hardware decode.
+    // NOTE: this is mutually exclusive with MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING
+    // (which forces software).  We omit the latter so HW decode is not suppressed.
+    const MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS: windows::core::GUID = windows::core::GUID {
+        data1: 0xa9cbbea3, data2: 0xd63a, data3: 0x4440,
+        data4: [0x8d, 0x47, 0x46, 0x8d, 0x4e, 0x7e, 0xa6, 0xd7],
+    };
+
     let reader: IMFSourceReader = unsafe {
         let mut attrs: Option<IMFAttributes> = None;
         MFCreateAttributes(&mut attrs, 2)
             .map_err(|e| anyhow!("MFCreateAttributes failed: {e}"))?;
         let attrs = attrs.unwrap();
-        attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1).ok();
+        attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1).ok();
         MFCreateSourceReaderFromURL(url, Some(&attrs))
             .map_err(|e| anyhow!("Open '{path:?}' failed: {e}"))?
     };
@@ -330,7 +358,7 @@ fn open_and_decode(
 
     let duration_us = unsafe { query_duration_us(&reader) };
 
-    let _ = init_tx.send(Ok((width, height, duration_us)));
+    let _ = init_tx.send(Ok((width, height, duration_us, fmt == DecodeFmt::Nv12)));
 
     // ── decode loop ────────────────────────────────────────────────────────
     let mut wall_start: Option<Instant> = None;
@@ -432,17 +460,23 @@ fn open_and_decode(
             }
         }
 
-        // ── pixel format conversion ────────────────────────────────────────
-        let bgra = match fmt {
-            DecodeFmt::Bgra => extract_bgra_via_2d(&sample, width as usize, height as usize)?,
-            DecodeFmt::Nv12 => extract_nv12_via_2d(&sample, width as usize, height as usize)?,
+        // ── frame extraction ──────────────────────────────────────────────
+        // NV12: copy raw Y+UV planes; GPU shader handles YCbCr → RGB.
+        // BGRA/YUY2: CPU converts to BGRA (only reached on HW-decode fallback).
+        let frame = match fmt {
+            DecodeFmt::Nv12 => extract_nv12_raw(&sample, height as usize)?,
+            DecodeFmt::Bgra => {
+                let data = extract_bgra_via_2d(&sample, width as usize, height as usize)?;
+                VideoFrame { data, format: VideoFormat::Bgra }
+            }
             DecodeFmt::Yuy2 => {
                 let raw = lock_contiguous(&sample)?;
-                yuy2_to_bgra(&raw, width as usize, height as usize)
+                let data = yuy2_to_bgra(&raw, width as usize, height as usize);
+                VideoFrame { data, format: VideoFormat::Bgra }
             }
         };
 
-        *latest.lock().unwrap() = Some(VideoFrame { data: bgra });
+        *latest.lock().unwrap() = Some(frame);
     }
 
     Ok(())
@@ -454,10 +488,12 @@ fn try_set_output_format(
 ) -> Result<DecodeFmt> {
     use windows::Win32::Media::MediaFoundation::*;
 
+    // NV12 first: hardware decoders output it natively (no CPU conversion).
+    // BGRA/YUY2 are fallbacks for software-only or exotic codecs.
     let candidates: &[(*const windows::core::GUID, DecodeFmt)] = &[
+        (&MFVideoFormat_NV12,   DecodeFmt::Nv12),
         (&MFVideoFormat_ARGB32, DecodeFmt::Bgra),
         (&MFVideoFormat_RGB32,  DecodeFmt::Bgra),
-        (&MFVideoFormat_NV12,   DecodeFmt::Nv12),
         (&MFVideoFormat_YUY2,   DecodeFmt::Yuy2),
     ];
 
@@ -523,13 +559,14 @@ fn extract_bgra_via_2d(
     Ok(out)
 }
 
-/// Extract an NV12 frame using IMF2DBuffer so we respect the actual row pitch.
-/// Converts to tightly-packed BGRA (width × height × 4 bytes).
-fn extract_nv12_via_2d(
+/// Copy raw NV12 data from an IMF2DBuffer without any CPU colour conversion.
+/// Returns a `VideoFrame` containing the Y plane (`height × stride` bytes) followed
+/// immediately by the UV plane (`height/2 × stride` bytes).  The GPU shader
+/// performs the YCbCr → RGB conversion.
+fn extract_nv12_raw(
     sample: &windows::Win32::Media::MediaFoundation::IMFSample,
-    width: usize,
     height: usize,
-) -> Result<Vec<u8>> {
+) -> Result<VideoFrame> {
     use windows::Win32::Media::MediaFoundation::IMF2DBuffer;
     use windows::core::Interface as _;
 
@@ -550,35 +587,34 @@ fn extract_nv12_via_2d(
     }
 
     let stride = pitch.unsigned_abs() as usize;
-    let mut dst = vec![0u8; width * height * 4];
 
-    // Y plane: scan0[row * stride + col]
-    // UV plane: scan0[height * stride + (row/2) * stride + col] (interleaved U,V)
-    let uv_offset = height * stride;
+    // Determine where the UV plane really starts.
+    // Hardware decoders pad coded_height to a block boundary (H.264: 16 px,
+    // HEVC: 64 px), so coded_height ≥ display_height.  The UV plane starts at
+    // coded_height × stride, not display_height × stride.
+    //
+    // Derive coded_height from the buffer's actual byte length:
+    //   total = coded_height × stride × 3/2
+    //   => coded_height = total / stride × 2/3
+    //   => uv_offset    = coded_height × stride = total × 2/3
+    let buf_len = unsafe { buf.GetCurrentLength().unwrap_or(0) } as usize;
+    let uv_offset = if stride > 0 && buf_len >= height * stride {
+        // Round to whole rows then scale by 2/3.
+        let total_rows = buf_len / stride; // coded_height × 3/2
+        (total_rows / 3 * 2) * stride      // coded_height × stride
+    } else {
+        height * stride  // safe fallback (may be wrong for padded codecs)
+    };
 
-    for row in 0..height {
-        for col in 0..width {
-            let y  = unsafe { *scan0.add(row * stride + col) } as i32 - 16;
-            let uv_row = row / 2;
-            let uv_col = col & !1;
-            let u = unsafe { *scan0.add(uv_offset + uv_row * stride + uv_col)     } as i32 - 128;
-            let v = unsafe { *scan0.add(uv_offset + uv_row * stride + uv_col + 1) } as i32 - 128;
-
-            let c = 298 * y;
-            let r = ((c           + 409 * v + 128) >> 8).clamp(0, 255) as u8;
-            let g = ((c - 100 * u - 208 * v + 128) >> 8).clamp(0, 255) as u8;
-            let b = ((c + 516 * u           + 128) >> 8).clamp(0, 255) as u8;
-
-            let i = (row * width + col) * 4;
-            dst[i]     = b;
-            dst[i + 1] = g;
-            dst[i + 2] = r;
-            dst[i + 3] = 255;
-        }
+    let uv_bytes = (height / 2) * stride;
+    let copy_len = uv_offset + uv_bytes;
+    let mut data = vec![0u8; copy_len];
+    unsafe {
+        std::ptr::copy_nonoverlapping(scan0, data.as_mut_ptr(), copy_len);
+        buf2d.Unlock2D().ok();
     }
 
-    unsafe { buf2d.Unlock2D().ok() };
-    Ok(dst)
+    Ok(VideoFrame { data, format: VideoFormat::Nv12 { stride, uv_offset } })
 }
 
 fn lock_contiguous(

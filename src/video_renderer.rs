@@ -21,11 +21,13 @@ struct VideoParams {
     uv_scale:  [f32; 2],
     mode:      u32,
     inv_zoom:  f32,
-    _pad:      [u32; 2],
+    /// 0 = BGRA texture, 1 = NV12 (Y + UV planes).
+    pixel_fmt: u32,
+    _pad:      u32,
 }
 
 impl VideoParams {
-    fn from_settings(settings: &VideoSettings, eye: usize) -> Self {
+    fn from_settings(settings: &VideoSettings, eye: usize, pixel_fmt: u32) -> Self {
         let zoom = settings.zoom.max(0.1);
         let inv_zoom = 1.0 / zoom;
         let mode = match (settings.proj, settings.mode) {
@@ -60,7 +62,8 @@ impl VideoParams {
             uv_scale,
             mode,
             inv_zoom,
-            _pad: [0; 2],
+            pixel_fmt,
+            _pad: 0,
         }
     }
 }
@@ -104,6 +107,8 @@ pub struct VideoRenderer {
     texture_bind_group: Option<wgpu::BindGroup>,
     params_buffer:      wgpu::Buffer,
     params_bind_group:  wgpu::BindGroup,
+    /// 0 = BGRA, 1 = NV12.  Set by `set_texture`.
+    pixel_fmt:          u32,
 }
 
 impl VideoRenderer {
@@ -150,6 +155,9 @@ impl VideoRenderer {
         });
 
         // ── texture bind group layout (group 1) ───────────────────────────
+        // binding 0: Y or BGRA texture
+        // binding 1: sampler
+        // binding 2: UV chroma texture (NV12 only; dummy 1×1 for BGRA)
         let texture_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vr_texture_bgl"),
             entries: &[
@@ -167,6 +175,16 @@ impl VideoRenderer {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
                     count: None,
                 },
             ],
@@ -197,7 +215,7 @@ impl VideoRenderer {
         });
 
         let default_params = VideoParams {
-            uv_offset: [0.0, 0.0], uv_scale: [1.0, 1.0], mode: 0, inv_zoom: 1.0, _pad: [0; 2],
+            uv_offset: [0.0, 0.0], uv_scale: [1.0, 1.0], mode: 0, inv_zoom: 1.0, pixel_fmt: 0, _pad: 0,
         };
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vr_params_buf"),
@@ -301,12 +319,14 @@ impl VideoRenderer {
             texture_bind_group: None,
             params_buffer,
             params_bind_group,
+            pixel_fmt: 0,
         }
     }
 
     /// Call once (and whenever the video texture is recreated) to update the
     /// sampler binding.
     pub fn set_texture(&mut self, device: &wgpu::Device, texture: &VideoTexture) {
+        self.pixel_fmt = if texture.is_nv12 { 1 } else { 0 };
         self.texture_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vr_texture_bg"),
             layout: &self.texture_bgl,
@@ -318,6 +338,10 @@ impl VideoRenderer {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&texture.uv_view),
                 },
             ],
         }));
@@ -348,7 +372,7 @@ impl VideoRenderer {
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&cam));
 
-        let params = VideoParams::from_settings(settings, eye);
+        let params = VideoParams::from_settings(settings, eye, self.pixel_fmt);
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
 
         let mut encoder = device.create_command_encoder(&Default::default());

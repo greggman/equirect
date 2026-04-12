@@ -17,19 +17,34 @@ use crate::video::texture::VideoTexture;
 
 // ── blit pipeline ─────────────────────────────────────────────────────────────
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct BlitParams {
+    /// 0 = BGRA texture, 1 = NV12 (Y in src_tex, UV in uv_tex).
+    pixel_fmt: u32,
+    _pad: [u32; 3],
+}
+
 struct VideoBlit {
     pipeline:    wgpu::RenderPipeline,
     bgl:         wgpu::BindGroupLayout,
+    #[allow(dead_code)]
+    params_bgl:  wgpu::BindGroupLayout,
     sampler:     wgpu::Sampler,
     bind_group:  Option<wgpu::BindGroup>,
+    params_buf:  wgpu::Buffer,
+    params_bg:   wgpu::BindGroup,
 }
 
 impl VideoBlit {
     fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        use wgpu::util::DeviceExt as _;
+
         let shader = device.create_shader_module(
             wgpu::include_wgsl!("shaders/video-blit.wgsl")
         );
 
+        // group 0: texture(s) + sampler
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("video_blit_bgl"),
             entries: &[
@@ -49,7 +64,47 @@ impl VideoBlit {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
             ],
+        });
+
+        // group 1: pixel_fmt uniform
+        let params_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("video_blit_params_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let default_params = BlitParams { pixel_fmt: 0, _pad: [0; 3] };
+        let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("video_blit_params_buf"),
+            contents: bytemuck::bytes_of(&default_params),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let params_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("video_blit_params_bg"),
+            layout: &params_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: params_buf.as_entire_binding(),
+            }],
         });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -63,7 +118,7 @@ impl VideoBlit {
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[Some(&bgl)],
+            bind_group_layouts: &[Some(&bgl), Some(&params_bgl)],
             immediate_size: 0,
         });
 
@@ -93,10 +148,16 @@ impl VideoBlit {
             cache: None,
         });
 
-        Self { pipeline, bgl, sampler, bind_group: None }
+        Self { pipeline, bgl, params_bgl, sampler, bind_group: None, params_buf, params_bg }
     }
 
-    fn set_texture(&mut self, device: &wgpu::Device, texture: &VideoTexture) {
+    fn set_texture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, texture: &VideoTexture) {
+        let p = BlitParams {
+            pixel_fmt: if texture.is_nv12 { 1 } else { 0 },
+            _pad: [0; 3],
+        };
+        queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&p));
+
         self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("video_blit_bg"),
             layout: &self.bgl,
@@ -108,6 +169,10 @@ impl VideoBlit {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&texture.uv_view),
                 },
             ],
         }));
@@ -138,6 +203,7 @@ impl VideoBlit {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, bg, &[]);
+            pass.set_bind_group(1, &self.params_bg, &[]);
             pass.draw(0..3, 0..1);
         }
         queue.submit([enc.finish()]);
@@ -211,8 +277,8 @@ impl VideoSwapchain {
 
     /// Call after uploading a new decoded frame to `VideoTexture` to rebind the
     /// blit source.
-    pub fn set_texture(&mut self, device: &wgpu::Device, texture: &VideoTexture) {
-        self.blit.set_texture(device, texture);
+    pub fn set_texture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, texture: &VideoTexture) {
+        self.blit.set_texture(device, queue, texture);
     }
 
     /// Acquire an image from the swapchain, blit the latest video frame into
