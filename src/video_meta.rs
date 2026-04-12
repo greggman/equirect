@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
@@ -45,6 +46,10 @@ pub fn save(video_path: &Path, meta: &VideoMeta) {
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct AppState {
     last_dir: Option<PathBuf>,
+    /// Maps a volume root path (as a string) to the last browsed directory
+    /// within that volume.  Missing on old state files; defaults to empty.
+    #[serde(default)]
+    volume_last_dirs: HashMap<String, PathBuf>,
 }
 
 fn config_dir() -> Option<PathBuf> {
@@ -83,5 +88,44 @@ pub fn load_last_dir() -> Option<PathBuf> {
 
 /// Persist `dir` as the last browsed directory.
 pub fn save_last_dir(dir: &Path) {
-    save_app_state(&AppState { last_dir: Some(dir.to_path_buf()) });
+    let mut state = load_app_state();
+    state.last_dir = Some(dir.to_path_buf());
+    save_app_state(&state);
+}
+
+// ── per-volume last-directory ──────────────────────────────────────────────
+
+/// Persist `dir` as the last browsed directory for the given `volume_root`.
+pub fn save_volume_last_dir(volume_root: &Path, dir: &Path) {
+    let mut state = load_app_state();
+    let key = volume_root.to_string_lossy().into_owned();
+    state.volume_last_dirs.insert(key, dir.to_path_buf());
+    save_app_state(&state);
+}
+
+/// Return the best directory to navigate to when the user selects `volume_root`.
+///
+/// Loads the last saved directory for that volume, then walks up the path
+/// until an existing directory is found.  Falls back to `volume_root` itself.
+pub fn resolve_dir_for_volume(volume_root: &Path) -> PathBuf {
+    let key = volume_root.to_string_lossy().into_owned();
+    let saved = load_app_state().volume_last_dirs.get(&key).cloned();
+
+    if let Some(mut dir) = saved {
+        loop {
+            if dir.is_dir() {
+                return dir;
+            }
+            // Don't climb above the volume root.
+            if dir == volume_root {
+                break;
+            }
+            match dir.parent() {
+                Some(p) => dir = p.to_path_buf(),
+                None => break,
+            }
+        }
+    }
+
+    volume_root.to_path_buf()
 }

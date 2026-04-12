@@ -363,9 +363,26 @@ impl ApplicationHandler for App {
             }
 
             if let Some(dir) = browser_actions.navigate {
+                let vol_root = crate::volumes::volume_root_of(&dir);
                 video_meta::save_last_dir(&dir);
+                video_meta::save_volume_last_dir(&vol_root, &dir);
                 if let Some(bs) = &mut self.browser_state {
                     bs.navigate_to(dir);
+                }
+            }
+
+            if let Some(vol_root) = browser_actions.select_volume {
+                // Save current browser position as that volume's last dir
+                // before switching away.
+                if let Some(bs) = &self.browser_state {
+                    let cur_root = crate::volumes::volume_root_of(&bs.dir);
+                    video_meta::save_volume_last_dir(&cur_root, &bs.dir);
+                }
+                // Resolve the best directory to land on in the selected volume.
+                let target = video_meta::resolve_dir_for_volume(&vol_root);
+                video_meta::save_last_dir(&target);
+                if let Some(bs) = &mut self.browser_state {
+                    bs.navigate_to(target);
                 }
             }
 

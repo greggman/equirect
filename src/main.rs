@@ -8,6 +8,7 @@ mod video;
 mod video_layer;
 mod video_meta;
 mod video_renderer;
+mod volumes;
 mod vr;
 
 /// Set to `true` when `-v` / `--verbose` is passed on the command line.

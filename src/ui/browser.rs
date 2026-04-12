@@ -21,9 +21,12 @@ pub struct BrowserState {
 /// Actions the browser UI wants the app to perform.
 #[derive(Default)]
 pub struct BrowserActions {
-    pub play:     Option<PathBuf>,
-    pub navigate: Option<PathBuf>,
-    pub close:    bool,
+    pub play:          Option<PathBuf>,
+    pub navigate:      Option<PathBuf>,
+    pub close:         bool,
+    /// The root path of the volume the user selected in the volumes popup.
+    /// The app resolves which directory to navigate to within that volume.
+    pub select_volume: Option<PathBuf>,
 }
 
 impl BrowserState {
@@ -96,7 +99,7 @@ pub fn draw(
     ui.style_mut().spacing.scroll.bar_width = 20.0;
     ui.style_mut().spacing.scroll.floating  = false;
 
-    // ── header: path + close ──────────────────────────────────────────────
+    // ── header: path + volumes button + close ────────────────────────────
     ui.horizontal(|ui| {
         ui.spacing_mut().button_padding = btn_pad;
 
@@ -107,8 +110,30 @@ pub fn draw(
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().button_padding = egui::vec2(6.0, 6.0);
+
+            // Close button (rightmost).
             if icons::icon_button(ui, icons::ICON_CLOSE, 24.0, interaction) {
                 actions.close = true;
+            }
+
+            // Volumes (drive picker) ComboBox.
+            let mut vol_selected: Option<std::path::PathBuf> = None;
+            egui::ComboBox::from_id_salt("volumes_picker")
+                .selected_text("Volumes")
+                .show_ui(ui, |ui| {
+                    let vols = crate::volumes::list_volumes();
+                    if vols.is_empty() {
+                        ui.label("(no volumes found)");
+                    } else {
+                        for vol in &vols {
+                            if ui.selectable_label(false, &vol.label).clicked() {
+                                vol_selected = Some(vol.root.clone());
+                            }
+                        }
+                    }
+                });
+            if let Some(root) = vol_selected {
+                actions.select_volume = Some(root);
             }
         });
     });
@@ -145,6 +170,19 @@ pub fn draw(
 
     scroll_area.show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
+
+        // Restrict interaction to positions inside the scroll area's clip rect
+        // AND on the scroll area's own layer.  Without the layer check, clicks
+        // on a ComboBox dropdown (a higher-z Area) that happen to land inside a
+        // row's rect would still fire `activated_by` because that check is
+        // purely position-based and ignores egui's z-order.
+        let clip         = ui.clip_rect();
+        let scroll_layer = ui.layer_id();
+        let clipped_interaction = interaction.filter(|(press, release)| {
+            clip.contains(*press) && clip.contains(*release)
+                && ui.ctx().layer_id_at(*press) .map_or(true, |l| l == scroll_layer)
+                && ui.ctx().layer_id_at(*release).map_or(true, |l| l == scroll_layer)
+        });
 
         let hover_bg  = ui.visuals().widgets.hovered.weak_bg_fill;
         let select_bg = egui::Color32::from_rgb(40, 60, 90);
@@ -191,7 +229,7 @@ pub fn draw(
                     text_color,
                 );
             }
-            if resp.activated_by(interaction) {
+            if resp.activated_by(clipped_interaction) {
                 if let Some(p) = navigate_to { actions.navigate = Some(p); }
                 if let Some(p) = play_path   { actions.play     = Some(p); }
             }

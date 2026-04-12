@@ -69,6 +69,21 @@ pub fn sprite_uv(sprite: IconSprite) -> egui::Rect {
 
 // ── Button helpers ────────────────────────────────────────────────────────────
 
+/// Render an icon button and return its raw `egui::Response`.
+///
+/// Use this when you need the response itself (e.g. to anchor a popup).
+#[allow(dead_code)]
+pub fn icon_button_resp(ui: &mut egui::Ui, sprite: IconSprite, size: f32) -> egui::Response {
+    let texture = get_texture(ui.ctx());
+    let uv = sprite_uv(sprite);
+    let img = egui::Image::from_texture(egui::load::SizedTexture::new(
+        texture.id(),
+        egui::vec2(size, size),
+    ))
+    .uv(uv);
+    ui.add(egui::Button::image(img))
+}
+
 /// Render an icon button.  Returns `true` if the button was activated via the
 /// VR pointer (`interaction`) semantics.
 pub fn icon_button(
