@@ -11,10 +11,37 @@ use winit::{
 
 use crate::pointer_renderer::PointerRenderer;
 use crate::renderer::Renderer;
-use crate::ui::browser::BrowserState;
+use crate::ui::browser::{BrowserState, VIDEO_EXTS};
 use crate::ui::settings::VideoSettings;
 use crate::video_layer::{VideoSwapchain, use_xr_layer};
 use crate::video_meta;
+
+/// Returns the path of the video that is `delta` steps away from `current`
+/// in a sorted list of video files in the same directory, wrapping around.
+/// Returns `None` if the directory can't be read or there are no other videos.
+fn adjacent_video(current: &std::path::Path, delta: i32) -> Option<PathBuf> {
+    let dir = current.parent()?;
+    let mut videos: Vec<PathBuf> = std::fs::read_dir(dir).ok()?
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            let ext = p.extension().and_then(|x| x.to_str())?;
+            if VIDEO_EXTS.iter().any(|&v| v.eq_ignore_ascii_case(ext)) {
+                Some(p)
+            } else {
+                None
+            }
+        })
+        .collect();
+    if videos.is_empty() { return None; }
+    videos.sort_by(|a, b| {
+        a.file_name().cmp(&b.file_name())
+    });
+    let n = videos.len() as i32;
+    let pos = videos.iter().position(|p| p == current)? as i32;
+    let next_pos = ((pos + delta).rem_euclid(n)) as usize;
+    Some(videos[next_pos].clone())
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum PanelMode {
@@ -326,10 +353,17 @@ impl ApplicationHandler for App {
 
                 let target_fmt = vr.swapchain_format;
 
-                // Restore saved settings for the new video (or reset to defaults).
+                // Restore saved settings for the new video; if none exist, inherit
+                // the current settings and immediately save them for the new file.
                 self.video_settings = video_meta::load(&new_path)
                     .map(|m| m.settings)
-                    .unwrap_or_else(VideoSettings::new);
+                    .unwrap_or_else(|| {
+                        let inherited = self.video_settings.clone();
+                        video_meta::save(&new_path, &video_meta::VideoMeta {
+                            settings: inherited.clone(),
+                        });
+                        inherited
+                    });
 
                 // Drop old video components before opening the new file.
                 self.video_swapchain = None;
@@ -446,6 +480,64 @@ impl ApplicationHandler for App {
                         // Signal the audio thread and flush stale buffered audio.
                         dec.audio_seek.store(target_us, Ordering::Relaxed);
                         dec.audio_flush_gen.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+
+            // ── prev / next video ──────────────────────────────────────────
+            let nav_delta: Option<i32> = if actions.prev { Some(-1) }
+                else if actions.next { Some(1) }
+                else { None };
+
+            if let Some(delta) = nav_delta {
+                if let Some(new_path) = self.video_path.as_deref()
+                    .and_then(|p| adjacent_video(p, delta))
+                {
+                    let target_fmt = vr.swapchain_format;
+
+                    self.video_settings = video_meta::load(&new_path)
+                        .map(|m| m.settings)
+                        .unwrap_or_else(|| {
+                            let inherited = self.video_settings.clone();
+                            video_meta::save(&new_path, &video_meta::VideoMeta {
+                                settings: inherited.clone(),
+                            });
+                            inherited
+                        });
+
+                    self.video_swapchain = None;
+                    self.video_decoder   = None;
+                    self.video_texture   = None;
+                    self.video_renderer  = None;
+
+                    match crate::video::decoder::VideoDecoder::open(new_path.clone()) {
+                        Err(e) => eprintln!("Failed to open video: {e}"),
+                        Ok(decoder) => {
+                            let tex = crate::video::texture::VideoTexture::new(
+                                &renderer.device, decoder.width, decoder.height,
+                            );
+                            let vr_rend = crate::video_renderer::VideoRenderer::new(
+                                &renderer.device, target_fmt,
+                                decoder.width, decoder.height,
+                            );
+                            let sc = vr.create_video_swapchain(
+                                &renderer.device, decoder.width, decoder.height,
+                            );
+                            if let Some(stem) = new_path.file_stem().and_then(|s| s.to_str()) {
+                                self.control_bar_state.video_name = stem.to_owned();
+                            }
+                            self.control_bar_state.duration_secs =
+                                if decoder.duration_us > 0 {
+                                    decoder.duration_us as f64 / 1_000_000.0
+                                } else { 0.0 };
+                            self.control_bar_state.current_secs = 0.0;
+                            self.control_bar_state.is_playing   = true;
+                            self.video_path      = Some(new_path);
+                            self.video_decoder   = Some(decoder);
+                            self.video_texture   = Some(tex);
+                            self.video_renderer  = Some(vr_rend);
+                            self.video_swapchain = sc;
+                        }
                     }
                 }
             }
