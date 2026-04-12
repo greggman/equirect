@@ -52,7 +52,10 @@ pub struct ControlBarActions {
 /// went from pressed → released.  We use this instead of egui's `clicked()`
 /// because egui's internal click-distance gating can silently drop clicks when
 /// the VR controller tremors between press and release.
-pub fn draw(ui: &mut egui::Ui, state: &ControlBarState, just_released: bool) -> ControlBarActions {
+/// Returns true if `press_pos` falls inside `resp`'s rect — the definition of
+/// pointer capture: only the widget the button was pressed on may fire.
+pub fn draw(ui: &mut egui::Ui, state: &ControlBarState, interaction: Option<(egui::Pos2, egui::Pos2)>) -> ControlBarActions {
+    use super::ResponseExt as _;
     let mut actions = ControlBarActions::default();
 
     let font_id = egui::FontId::proportional(22.0);
@@ -63,28 +66,26 @@ pub fn draw(ui: &mut egui::Ui, state: &ControlBarState, just_released: bool) -> 
         ui.style_mut().text_styles.insert(btn_style.clone(), font_id.clone());
         ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
 
-        // We check `hovered()` instead of `clicked()`: hovered() is exactly
-        // what drives the button highlight, and we own the press/release edge.
-        if ui.button("◀◀").hovered() && just_released { actions.prev = true; }
+        if ui.button("◀◀").activated_by(interaction)        { actions.prev = true; }
 
         let play_label = if state.is_playing { "⏸" } else { "▶" };
-        if ui.button(play_label).hovered() && just_released { actions.play_pause = true; }
+        if ui.button(play_label).activated_by(interaction)   { actions.play_pause = true; }
 
-        if ui.button("▶▶").hovered() && just_released { actions.next = true; }
+        if ui.button("▶▶").activated_by(interaction)         { actions.next = true; }
 
         let speed_label = SPEED_LABELS[state.speed_index];
-        if ui.button(speed_label).hovered() && just_released { actions.cycle_speed = true; }
+        if ui.button(speed_label).activated_by(interaction)  { actions.cycle_speed = true; }
 
         let loop_label = match state.loop_state {
             0 => "↩",
             1 => "↩·",
             _ => "↩●",
         };
-        if ui.button(loop_label).hovered() && just_released { actions.cycle_loop = true; }
+        if ui.button(loop_label).activated_by(interaction)   { actions.cycle_loop = true; }
 
-        if ui.button("⚙").hovered() && just_released { actions.show_settings = true; }
-        if ui.button("≡").hovered() && just_released { actions.show_browser = true; }
-        if ui.button("✕").hovered() && just_released { actions.exit = true; }
+        if ui.button("⚙").activated_by(interaction) { actions.show_settings = true; }
+        if ui.button("≡").activated_by(interaction) { actions.show_browser = true; }
+        if ui.button("✕").activated_by(interaction) { actions.exit = true; }
     });
 
     // ── video name ────────────────────────────────────────────────────────

@@ -53,8 +53,9 @@ pub struct SettingsActions {
 pub fn draw(
     ui: &mut egui::Ui,
     state: &mut VideoSettings,
-    just_released: bool,
+    interaction: Option<(egui::Pos2, egui::Pos2)>,
 ) -> SettingsActions {
+    use super::ResponseExt as _;
     let mut actions = SettingsActions::default();
 
     let font    = egui::FontId::proportional(22.0);
@@ -76,7 +77,7 @@ pub fn draw(
                 .color(egui::Color32::WHITE),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Cancel").hovered() && just_released {
+            if ui.button("Cancel").activated_by(interaction) {
                 actions.close = true;
             }
         });
@@ -107,7 +108,7 @@ pub fn draw(
         for &(label, mode) in modes {
             let selected = state.mode == mode;
             let btn = egui::Button::new(label).selected(selected);
-            if ui.add(btn).hovered() && just_released && !selected {
+            if ui.add(btn).activated_by(interaction) && !selected {
                 state.mode = mode;
                 // Reset sub-options that may not be valid in new mode.
                 if !matches!(state.mode, VideoMode::View180 | VideoMode::View360) {
@@ -135,7 +136,7 @@ pub fn draw(
             for &(label, proj) in projs {
                 let selected = state.proj == proj;
                 let btn = egui::Button::new(label).selected(selected);
-                if ui.add(btn).hovered() && just_released && !selected && proj_enabled {
+                if ui.add(btn).activated_by(interaction) && !selected && proj_enabled {
                     state.proj = proj;
                     actions.changed = true;
                 }
@@ -163,7 +164,7 @@ pub fn draw(
                 let selected = state.stereo == layout;
                 let btn = egui::Button::new(label).selected(selected);
                 let resp = ui.add_enabled(avail, btn);
-                if resp.hovered() && just_released && !selected && stereo_enabled && avail {
+                if resp.activated_by(interaction) && !selected && stereo_enabled && avail {
                     state.stereo = layout;
                     actions.changed = true;
                 }
@@ -179,7 +180,7 @@ pub fn draw(
         ui.spacing_mut().button_padding = btn_pad;
 
         // Reset button
-        if ui.button("1×").hovered() && just_released && (state.zoom - 1.0).abs() > 0.001 {
+        if ui.button("1×").activated_by(interaction) && (state.zoom - 1.0).abs() > 0.001 {
             state.zoom = 1.0;
             actions.changed = true;
         }

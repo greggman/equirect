@@ -76,8 +76,9 @@ impl BrowserState {
 pub fn draw(
     ui: &mut egui::Ui,
     state: &mut BrowserState,
-    just_released: bool,
+    interaction: Option<(egui::Pos2, egui::Pos2)>,
 ) -> BrowserActions {
+    use super::ResponseExt as _;
     let mut actions = BrowserActions::default();
 
     let font    = egui::FontId::proportional(22.0);
@@ -105,7 +106,7 @@ pub fn draw(
                 .color(egui::Color32::LIGHT_GRAY),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Cancel").hovered() && just_released {
+            if ui.button("Cancel").activated_by(interaction) {
                 actions.close = true;
             }
         });
@@ -189,7 +190,7 @@ pub fn draw(
                     text_color,
                 );
             }
-            if resp.hovered() && just_released {
+            if resp.activated_by(interaction) {
                 if let Some(p) = navigate_to { actions.navigate = Some(p); }
                 if let Some(p) = play_path   { actions.play     = Some(p); }
             }

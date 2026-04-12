@@ -63,6 +63,8 @@ pub struct PanelRenderer {
     // pointer interaction state
     cursor_pos:    Option<egui::Pos2>,
     prev_clicking: bool,
+    /// Where the button was first pressed; used to detect drags vs clicks.
+    press_pos:     Option<egui::Pos2>,
 }
 
 impl PanelRenderer {
@@ -248,6 +250,7 @@ impl PanelRenderer {
             panel_hh: height_m / 2.0,
             cursor_pos: None,
             prev_clicking: false,
+            press_pos: None,
         }
     }
 
@@ -271,6 +274,25 @@ impl PanelRenderer {
         Some((t, hit))
     }
 
+    /// Like `hit_test` but clamps the result to the panel bounds instead of
+    /// returning `None` when the ray misses.  Used for pointer capture so the
+    /// cursor continues to track along the panel edge during a drag.
+    /// Returns `None` only if the ray is parallel to (or behind) the panel.
+    fn hit_test_clamped(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<egui::Pos2> {
+        if ray_dir.z.abs() < 1e-6 { return None; }
+        let t = (self.panel_center.z - ray_origin.z) / ray_dir.z;
+        if t <= 0.001 { return None; }
+        let hit = ray_origin + ray_dir * t;
+        let dx = hit.x - self.panel_center.x;
+        let dy = hit.y - self.panel_center.y;
+        let u = ((dx + self.panel_hw) / (self.panel_hw * 2.0)).clamp(0.0, 1.0);
+        let v = 1.0 - ((dy + self.panel_hh) / (self.panel_hh * 2.0)).clamp(0.0, 1.0);
+        Some(egui::Pos2 {
+            x: u * self.pixel_width  as f32,
+            y: v * self.pixel_height as f32,
+        })
+    }
+
     /// Returns the 3-D world-space hit point on the panel, or `None`.
     pub fn hit_test_3d(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<Vec3> {
         self.intersect(ray_origin, ray_dir).map(|(_, p)| p)
@@ -292,14 +314,18 @@ impl PanelRenderer {
     /// Generic update: runs `draw_fn` inside the egui panel, renders the result
     /// to the offscreen texture, and returns whatever `draw_fn` returns.
     ///
-    /// `draw_fn(ui, just_released)` — `just_released` is true on the single frame
-    /// the controller select button went pressed → released while over the panel.
+    /// `draw_fn(ui, interaction)` — `interaction` is `Some((press_pos, release_pos))`
+    /// on the single frame the controller select button is released.  Both positions
+    /// are egui pixel coordinates from our own hit-test, not from egui's internal
+    /// state.  A widget should activate only if both positions fall within its rect,
+    /// implementing true pointer capture: the widget under the press owns the
+    /// interaction until release.
     pub fn update_ui<T: Default>(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         controllers: &[Option<ControllerState>; 2],
-        draw_fn: impl FnOnce(&mut egui::Ui, bool) -> T,
+        draw_fn: impl FnOnce(&mut egui::Ui, Option<(egui::Pos2, egui::Pos2)>) -> T,
     ) -> T {
         // ── Build pointer events from controller hit-tests ─────────────────
         let mut events: Vec<egui::Event> = Vec::new();
@@ -318,10 +344,40 @@ impl PanelRenderer {
             }
         }
 
-        // `just_released`: the one frame where the select button went pressed→released
-        // while the cursor was on the panel.  Passed to draw() so buttons can fire
-        // reliably without going through egui's internal click-distance gating.
-        let just_released = !new_clicking && self.prev_clicking && new_pos.is_some();
+        // Pointer capture: while the button is held and the ray has left the
+        // panel, project onto the infinite panel plane and clamp to bounds.
+        // This keeps sliders and scrollbars tracking along the edge rather than
+        // freezing at the last known position.
+        if self.prev_clicking && new_pos.is_none() {
+            new_pos = controllers.iter().flatten()
+                .find_map(|c| self.hit_test_clamped(c.ray_origin, c.ray_dir))
+                .or(self.cursor_pos);            // fallback: ray parallel to panel
+            new_clicking = controllers.iter().flatten().any(|c| c.clicking);
+        }
+
+        // Record where the button first went down; this is the widget that owns
+        // the pointer capture and is the only widget allowed to fire on release.
+        if new_clicking && !self.prev_clicking {
+            self.press_pos = new_pos;
+        }
+
+        // `interaction`: on the single frame the button is released, `Some((press_pos,
+        // release_pos))` — both in egui pixel space from our own hit-test.  Draw
+        // functions use this to implement true pointer capture: a widget fires if
+        // and only if both positions fall within its rect.
+        let interaction: Option<(egui::Pos2, egui::Pos2)> =
+            if !new_clicking && self.prev_clicking {
+                // `new_pos` is authoritative release position from this frame's hit-test.
+                // Fall back to press_pos if the ray left the panel on the same frame
+                // the button was released (extremely unlikely but safe).
+                self.press_pos.zip(new_pos.or(self.press_pos))
+            } else {
+                None
+            };
+
+        if !new_clicking {
+            self.press_pos = None;
+        }
 
         match (self.cursor_pos, new_pos) {
             (_, Some(pos)) => {
@@ -389,7 +445,7 @@ impl PanelRenderer {
                 )
                 .show(ctx, |ui| {
                     if let Some(f) = draw_fn_opt.take() {
-                        result = f(ui, just_released);
+                        result = f(ui, interaction);
                     }
                 });
         });
@@ -452,8 +508,8 @@ impl PanelRenderer {
         state: &ControlBarState,
         controllers: &[Option<ControllerState>; 2],
     ) -> ControlBarActions {
-        self.update_ui(device, queue, controllers, |ui, just_released| {
-            draw(ui, state, just_released)
+        self.update_ui(device, queue, controllers, |ui, interaction| {
+            draw(ui, state, interaction)
         })
     }
 

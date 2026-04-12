@@ -721,7 +721,7 @@ impl VrContext {
         let browser_actions = match &mut browser {
             Some((p, s)) => p.update_ui(
                 &renderer.device, &renderer.queue, &oriented_controllers,
-                |ui, just_released| browser_draw(ui, s, just_released),
+                |ui, interaction| browser_draw(ui, s, interaction),
             ),
             None => BrowserActions::default(),
         };
@@ -730,7 +730,7 @@ impl VrContext {
         let settings_actions = match &mut settings {
             Some((p, s)) => p.update_ui(
                 &renderer.device, &renderer.queue, &oriented_controllers,
-                |ui, just_released| settings_draw(ui, s, just_released),
+                |ui, interaction| settings_draw(ui, s, interaction),
             ),
             None => SettingsActions::default(),
         };
