@@ -208,6 +208,59 @@ fn decode_thread(
     }
 }
 
+// ── D3D11 device manager for hardware-accelerated decode ──────────────────
+
+/// Create a D3D11 device (with video support) and wrap it in an
+/// `IMFDXGIDeviceManager` so the MF source reader can use DXVA2/D3D11VA.
+fn create_dxgi_device_manager()
+    -> Result<windows::Win32::Media::MediaFoundation::IMFDXGIDeviceManager>
+{
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, ID3D11Device,
+        ID3D11Multithread,
+    };
+    use windows::Win32::Media::MediaFoundation::{
+        IMFDXGIDeviceManager, MFCreateDXGIDeviceManager,
+    };
+    use windows::core::Interface as _;
+
+    unsafe {
+        let mut device: Option<ID3D11Device> = None;
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            None,
+        ).map_err(|e| anyhow!("D3D11CreateDevice: {e}"))?;
+        let device = device.unwrap();
+
+        // Required: enable multithreaded protection on the device before
+        // passing it to MF, which calls it from its own internal threads.
+        let mt: ID3D11Multithread = device.cast()
+            .map_err(|e| anyhow!("ID3D11Multithread: {e}"))?;
+        let _ = mt.SetMultithreadProtected(true);
+
+        let mut reset_token: u32 = 0;
+        let mut mgr: Option<IMFDXGIDeviceManager> = None;
+        MFCreateDXGIDeviceManager(&mut reset_token, &mut mgr)
+            .map_err(|e| anyhow!("MFCreateDXGIDeviceManager: {e}"))?;
+        let mgr = mgr.unwrap();
+
+        mgr.ResetDevice(&device, reset_token)
+            .map_err(|e| anyhow!("IMFDXGIDeviceManager::ResetDevice: {e}"))?;
+
+        Ok(mgr)
+    }
+}
+
 // ── what pixel format the source reader is delivering ─────────────────────
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -299,9 +352,9 @@ fn open_and_decode(
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0u16]).collect();
     let url = PCWSTR(wide.as_ptr());
 
-    // MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS: prefer DXVA2/D3D11VA hardware decode.
-    // NOTE: this is mutually exclusive with MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING
-    // (which forces software).  We omit the latter so HW decode is not suppressed.
+    // MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS: use hardware MFTs (encoders/decoders).
+    // NOTE: hardware VIDEO DECODE (DXVA2/D3D11VA) also requires MF_SOURCE_READER_D3D_MANAGER;
+    // without a D3D device manager MF silently falls back to software decode.
     const MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS: windows::core::GUID = windows::core::GUID {
         data1: 0xa9cbbea3, data2: 0xd63a, data3: 0x4440,
         data4: [0x8d, 0x47, 0x46, 0x8d, 0x4e, 0x7e, 0xa6, 0xd7],
@@ -309,10 +362,20 @@ fn open_and_decode(
 
     let reader: IMFSourceReader = unsafe {
         let mut attrs: Option<IMFAttributes> = None;
-        MFCreateAttributes(&mut attrs, 2)
+        MFCreateAttributes(&mut attrs, 3)
             .map_err(|e| anyhow!("MFCreateAttributes failed: {e}"))?;
         let attrs = attrs.unwrap();
         attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1).ok();
+
+        // Supply a D3D11 device manager so MF can use DXVA2/D3D11VA hardware decode.
+        // Without this, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS is a no-op for decode.
+        if let Ok(mgr) = create_dxgi_device_manager() {
+            attrs.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, &mgr).ok();
+            vprintln!("Video: D3D11 device manager attached (hardware decode enabled)");
+        } else {
+            vprintln!("Video: D3D11 device manager unavailable, falling back to software decode");
+        }
+
         MFCreateSourceReaderFromURL(url, Some(&attrs))
             .map_err(|e| anyhow!("Open '{path:?}' failed: {e}"))?
     };
