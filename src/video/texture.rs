@@ -16,7 +16,11 @@ impl VideoTexture {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Bgra8Unorm,
+            // sRGB format: the GPU linearises on sample and re-encodes on write to the
+            // sRGB swapchain, giving one correct gamma pass.  Bgra8Unorm would let the
+            // already-gamma-encoded video bytes through as if they were linear, causing
+            // the swapchain to apply gamma a second time (washed-out / too bright).
+            format: wgpu::TextureFormat::Bgra8UnormSrgb,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
