@@ -1,5 +1,7 @@
 # Equirect
 
+<img alt="Equirect logo" src="resources/images/equirect.svg" width="400">
+
 A Rust VR Video Player
 
 [Download here](https://github.com/greggman/equirect/releases/latest)
@@ -56,5 +58,13 @@ filenames in the display. Put a logo or something on the window that appears
 on the desktop. I might try to separate out the video to GPU part into a
 crate if that's useful. Maybe it could be the start of a wgpu 
 [`importExternalTexture`](https://gpuweb.github.io/gpuweb/#dom-gpudevice-importexternaltexture) implementation crate.
+
+## Development
+
+To re-generate the icon texture atlas
+
+```sh
+npx svg-texture-atlas 128 resources/icons resource/icons
+```
 
 ## License: MIT
