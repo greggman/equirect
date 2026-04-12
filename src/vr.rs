@@ -11,7 +11,7 @@ use crate::ui::settings::{SettingsActions, VideoSettings, draw as settings_draw}
 use crate::video::texture::VideoTexture;
 use crate::video_layer::{
     VideoSwapchain, EffectiveLayerMode, effective_mode,
-    forward_pose, zoom_angles,
+    zoom_angles,
 };
 use crate::video_renderer::VideoRenderer;
 
@@ -52,6 +52,37 @@ fn fov_to_projection(fov: xr::Fovf, near: f32, far: f32) -> glam::Mat4 {
         glam::Vec4::new((tr + tl) / w, (tu + td) / h, -far / (far - near), -1.0),
         glam::Vec4::new(0.0, 0.0, -(far * near) / (far - near), 0.0),
     )
+}
+
+/// Extract only the yaw (rotation around stage Y axis) from an XR head pose as a quaternion.
+/// Returns a rotation R such that R * NEG_Z = the head's horizontal forward direction.
+fn yaw_quat_from_head(pose: &xr::Posef) -> glam::Quat {
+    let q = pose.orientation;
+    let forward = glam::Quat::from_xyzw(q.x, q.y, q.z, q.w) * glam::Vec3::NEG_Z;
+    let yaw = f32::atan2(forward.x, -forward.z);
+    // Negate: from_rotation_y(a) maps NEG_Z to (-sin(a), 0, -cos(a)),
+    // so we need -yaw to get (sin(yaw), 0, -cos(yaw)) = the forward direction.
+    glam::Quat::from_rotation_y(-yaw)
+}
+
+/// Extract the full head orientation from an XR head pose as a glam quaternion.
+fn full_quat_from_head(pose: &xr::Posef) -> glam::Quat {
+    let q = pose.orientation;
+    glam::Quat::from_xyzw(q.x, q.y, q.z, q.w)
+}
+
+/// Build an XR pose for a video layer given a base orientation.
+/// Position is placed `dist` metres ahead along the horizontal forward of `orient`
+/// at `height` metres above the stage floor; the layer orientation is `orient` itself.
+fn oriented_pose(dist: f32, height: f32, orient: glam::Quat) -> xr::Posef {
+    // Use only the horizontal component of the forward vector for positioning so
+    // that looking up/down doesn't float the quad above or below eye level.
+    let fwd = orient * glam::Vec3::NEG_Z;
+    let horiz = glam::Vec2::new(fwd.x, fwd.z).normalize_or(glam::Vec2::new(0.0, -1.0));
+    xr::Posef {
+        position: xr::Vector3f { x: horiz.x * dist, y: height, z: horiz.y * dist },
+        orientation: xr::Quaternionf { x: orient.x, y: orient.y, z: orient.z, w: orient.w },
+    }
 }
 
 fn pose_to_view(pose: xr::Posef) -> glam::Mat4 {
@@ -251,6 +282,14 @@ pub struct VrContext {
     pub should_quit: bool,
     frame_count: u64,
     prev_menu_pressed: bool,
+    prev_grip_pressed: bool,
+    /// Base orientation applied to all video layers.
+    /// At startup this is a yaw-only rotation so the video faces the user
+    /// regardless of where they happen to be looking vertically.
+    /// After a grip press it is the full head orientation so the video is
+    /// locked exactly to where the user was pointing.
+    base_orientation: glam::Quat,
+    orientation_initialized: bool,
     // Input — NOT ManuallyDrop; dropped explicitly in Drop before the session.
     xr_input: Option<XrInput>,
 }
@@ -474,6 +513,9 @@ impl VrContext {
             should_quit: false,
             frame_count: 0,
             prev_menu_pressed: false,
+            prev_grip_pressed: false,
+            base_orientation: glam::Quat::IDENTITY,
+            orientation_initialized: false,
             xr_input,
         })
     }
@@ -600,14 +642,49 @@ impl VrContext {
             }
         };
 
+        // On the first rendered frame: capture yaw only so the video faces the user
+        // regardless of any pitch the headset had while being put on.
+        if !self.orientation_initialized {
+            self.base_orientation = yaw_quat_from_head(&views[0].pose);
+            self.orientation_initialized = true;
+            println!("XR: base orientation initialised (yaw-only)");
+        }
+
+        // Edge-detect grip press — either controller resets the base orientation
+        // to the full head orientation (including pitch).
+        let any_grip_now = controllers.iter().flatten().any(|c| c.grip_pressed);
+        let grip_just_pressed = any_grip_now && !self.prev_grip_pressed;
+        self.prev_grip_pressed = any_grip_now;
+        if grip_just_pressed {
+            self.base_orientation = full_quat_from_head(&views[0].pose);
+            println!("XR: base orientation reset (full)");
+        }
+
         // Edge-detect B/Y menu button across both controllers.
         let any_menu_now = controllers.iter().flatten().any(|c| c.menu_pressed);
         let menu_just_pressed = any_menu_now && !self.prev_menu_pressed;
         self.prev_menu_pressed = any_menu_now;
 
+        // Build controller rays in the panel's local frame (inverse of base_orientation).
+        // Panels live at (0, y, -2) in local space; base_orientation rotates that frame
+        // into stage space.  Hit-testing and egui input both need local-frame rays.
+        let inv_orient = self.base_orientation.inverse();
+        let oriented_controllers: [Option<ControllerState>; 2] = [
+            controllers[0].map(|c| ControllerState {
+                ray_origin: inv_orient * c.ray_origin,
+                ray_dir:    inv_orient * c.ray_dir,
+                ..c
+            }),
+            controllers[1].map(|c| ControllerState {
+                ray_origin: inv_orient * c.ray_origin,
+                ray_dir:    inv_orient * c.ray_dir,
+                ..c
+            }),
+        ];
+
         // Update the control-bar panel egui texture once (shared by both eyes).
         let mut cb_actions = match &mut panel {
-            Some((p, s)) => p.update(&renderer.device, &renderer.queue, s, &controllers),
+            Some((p, s)) => p.update(&renderer.device, &renderer.queue, s, &oriented_controllers),
             None => ControlBarActions::default(),
         };
         cb_actions.menu_toggle = menu_just_pressed;
@@ -615,7 +692,7 @@ impl VrContext {
         // Update the browser panel egui texture once (shared by both eyes).
         let browser_actions = match &mut browser {
             Some((p, s)) => p.update_ui(
-                &renderer.device, &renderer.queue, &controllers,
+                &renderer.device, &renderer.queue, &oriented_controllers,
                 |ui, just_released| browser_draw(ui, s, just_released),
             ),
             None => BrowserActions::default(),
@@ -624,24 +701,27 @@ impl VrContext {
         // Update the settings panel egui texture once (shared by both eyes).
         let settings_actions = match &mut settings {
             Some((p, s)) => p.update_ui(
-                &renderer.device, &renderer.queue, &controllers,
+                &renderer.device, &renderer.queue, &oriented_controllers,
                 |ui, just_released| settings_draw(ui, s, just_released),
             ),
             None => SettingsActions::default(),
         };
 
         // Compute where each controller ray hits any active panel (for beam truncation).
+        // Hit-test in local (panel) space, then rotate the result back to stage space
+        // so the pointer beam (rendered with stage-space view_mat) lines up correctly.
         let pointer_hits: [Option<glam::Vec3>; 2] = {
             let mut h = [None, None];
-            for (i, ctrl) in controllers.iter().enumerate() {
-                if let Some(ctrl) = ctrl {
-                    let hit = panel.as_ref()
-                        .and_then(|(p, _)| p.hit_test_3d(ctrl.ray_origin, ctrl.ray_dir))
+            for (i, oc) in oriented_controllers.iter().enumerate() {
+                if let Some(oc) = oc {
+                    let local_hit = panel.as_ref()
+                        .and_then(|(p, _)| p.hit_test_3d(oc.ray_origin, oc.ray_dir))
                         .or_else(|| browser.as_ref()
-                            .and_then(|(p, _)| p.hit_test_3d(ctrl.ray_origin, ctrl.ray_dir)))
+                            .and_then(|(p, _)| p.hit_test_3d(oc.ray_origin, oc.ray_dir)))
                         .or_else(|| settings.as_ref()
-                            .and_then(|(p, _)| p.hit_test_3d(ctrl.ray_origin, ctrl.ray_dir)));
-                    h[i] = hit;
+                            .and_then(|(p, _)| p.hit_test_3d(oc.ray_origin, oc.ray_dir)));
+                    // Rotate hit back to stage space for the pointer renderer.
+                    h[i] = local_hit.map(|hp| self.base_orientation * hp);
                 }
             }
             h
@@ -664,20 +744,27 @@ impl VrContext {
 
             // Fisheye shader path (only when no XR layer is in use).
             if let Some((vr_rend, _, vs)) = video_shader {
-                vr_rend.render_eye(&tex_view, proj, view_mat, vs, eye, &renderer.device, &renderer.queue);
+                // Pre-rotate the view by base_orientation so the video's forward axis
+                // (-Z in video space) maps to the user's captured direction in stage space.
+                let view_oriented = view_mat * glam::Mat4::from_quat(self.base_orientation);
+                vr_rend.render_eye(&tex_view, proj, view_oriented, vs, eye, &renderer.device, &renderer.queue);
             } else {
                 // Clear to transparent so the video composition layer shows through.
                 renderer.clear_xr_eye(&tex_view);
             }
 
+            // Panels live in the "oriented" local frame.  Pre-multiply view by the base
+            // orientation so that a panel at local (0, y, -2) appears in front of the
+            // user's initial (or grip-reset) facing direction in stage space.
+            let view_oriented = view_mat * glam::Mat4::from_quat(self.base_orientation);
             if let Some((p, _)) = &panel {
-                p.render_eye(&tex_view, proj, view_mat, &renderer.device, &renderer.queue);
+                p.render_eye(&tex_view, proj, view_oriented, &renderer.device, &renderer.queue);
             }
             if let Some((p, _)) = &browser {
-                p.render_eye(&tex_view, proj, view_mat, &renderer.device, &renderer.queue);
+                p.render_eye(&tex_view, proj, view_oriented, &renderer.device, &renderer.queue);
             }
             if let Some((p, _)) = &settings {
-                p.render_eye(&tex_view, proj, view_mat, &renderer.device, &renderer.queue);
+                p.render_eye(&tex_view, proj, view_oriented, &renderer.device, &renderer.queue);
             }
             if let Some(ptr) = pointer_renderer {
                 ptr.render_eye(&tex_view, proj, view_mat, &controllers, &pointer_hits, &renderer.device, &renderer.queue);
@@ -759,7 +846,7 @@ impl VrContext {
                             .space(stage)
                             .eye_visibility(eye_vis)
                             .sub_image(sub)
-                            .pose(forward_pose(2.5, 1.0))
+                            .pose(oriented_pose(2.5, 1.0, self.base_orientation))
                             .size(xr::Extent2Df {
                                 width:  screen_w / zoom,
                                 height: screen_h / zoom,
@@ -772,7 +859,7 @@ impl VrContext {
                             .space(stage)
                             .eye_visibility(eye_vis)
                             .sub_image(sub)
-                            .pose(forward_pose(0.0, 1.0))
+                            .pose(oriented_pose(0.0, 1.0, self.base_orientation))
                             .radius(radius)
                             .central_angle(central_angle)
                             .aspect_ratio(disp_aspect);
@@ -786,7 +873,7 @@ impl VrContext {
                             .space(stage)
                             .eye_visibility(eye_vis)
                             .sub_image(sub)
-                            .pose(xr::Posef::IDENTITY)
+                            .pose(oriented_pose(0.0, 0.0, self.base_orientation))
                             .radius(0.0)
                             .central_horizontal_angle(ch)
                             .upper_vertical_angle(vu)
@@ -801,7 +888,7 @@ impl VrContext {
                             .space(stage)
                             .eye_visibility(eye_vis)
                             .sub_image(sub)
-                            .pose(xr::Posef::IDENTITY)
+                            .pose(oriented_pose(0.0, 0.0, self.base_orientation))
                             .radius(0.0)
                             .central_horizontal_angle(ch)
                             .upper_vertical_angle(vu)

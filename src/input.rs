@@ -1,6 +1,7 @@
 use openxr as xr;
 
 /// Snapshot of one controller for a single frame.
+#[derive(Clone, Copy)]
 pub struct ControllerState {
     /// World-space origin of the aim ray.
     pub ray_origin: glam::Vec3,
@@ -12,6 +13,8 @@ pub struct ControllerState {
     pub thumbstick_y: f32,
     /// B (right hand) or Y (left hand) button — panel show/hide toggle.
     pub menu_pressed: bool,
+    /// Grip / squeeze button.
+    pub grip_pressed: bool,
 }
 
 /// Manages OpenXR action sets for both hand controllers.
@@ -21,6 +24,7 @@ pub struct XrInput {
     click_action:       xr::Action<bool>,
     thumbstick_action:  xr::Action<xr::Vector2f>,
     menu_action:        xr::Action<bool>,
+    grip_action:        xr::Action<bool>,
     aim_spaces:         [xr::Space; 2],
     hand_paths:         [xr::Path; 2],
 }
@@ -61,6 +65,11 @@ impl XrInput {
             .map_err(|e| eprintln!("XR input: create menu_toggle: {e}"))
             .ok()?;
 
+        let grip_action = action_set
+            .create_action::<bool>("grip", "Grip", &hand_paths)
+            .map_err(|e| eprintln!("XR input: create grip: {e}"))
+            .ok()?;
+
         // ── Oculus / Meta Touch controller bindings ────────────────────────
         // A (right) and X (left) are the primary face buttons used for selection.
         if let Ok(profile) = instance
@@ -72,6 +81,7 @@ impl XrInput {
                 Some(lc), Some(rc),
                 Some(lt), Some(rt),
                 Some(ly), Some(rb),
+                Some(lg), Some(rg),
             ) = (
                 make_path("/user/hand/left/input/aim/pose"),
                 make_path("/user/hand/right/input/aim/pose"),
@@ -81,6 +91,8 @@ impl XrInput {
                 make_path("/user/hand/right/input/thumbstick"),
                 make_path("/user/hand/left/input/y/click"),
                 make_path("/user/hand/right/input/b/click"),
+                make_path("/user/hand/left/input/squeeze/value"),
+                make_path("/user/hand/right/input/squeeze/value"),
             ) {
                 let _ = instance.suggest_interaction_profile_bindings(
                     profile,
@@ -93,6 +105,8 @@ impl XrInput {
                         xr::Binding::new(&thumbstick_action,  rt),
                         xr::Binding::new(&menu_action,        ly),
                         xr::Binding::new(&menu_action,        rb),
+                        xr::Binding::new(&grip_action,        lg),
+                        xr::Binding::new(&grip_action,        rg),
                     ],
                 );
             }
@@ -138,7 +152,7 @@ impl XrInput {
         ];
 
         println!("XR: controller input ready");
-        Some(Self { action_set, pose_action, click_action, thumbstick_action, menu_action, aim_spaces, hand_paths })
+        Some(Self { action_set, pose_action, click_action, thumbstick_action, menu_action, grip_action, aim_spaces, hand_paths })
     }
 
     /// Sync the action set and return the current state of both controllers.
@@ -191,7 +205,13 @@ impl XrInput {
                 .map(|s| s.current_state && s.is_active)
                 .unwrap_or(false);
 
-            out[i] = Some(ControllerState { ray_origin: pos, ray_dir, clicking, thumbstick_y, menu_pressed });
+            let grip_pressed = self
+                .grip_action
+                .state(session, hand_path)
+                .map(|s| s.current_state && s.is_active)
+                .unwrap_or(false);
+
+            out[i] = Some(ControllerState { ray_origin: pos, ray_dir, clicking, thumbstick_y, menu_pressed, grip_pressed });
         }
         out
     }
