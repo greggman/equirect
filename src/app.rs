@@ -10,7 +10,7 @@ use winit::{
 
 use crate::pointer_renderer::PointerRenderer;
 use crate::renderer::Renderer;
-use crate::ui::control_bar::ControlBarState;
+use crate::ui::control_bar::{ControlBarState, SPEEDS};
 use crate::ui::panel::PanelRenderer;
 use crate::video::decoder::VideoDecoder;
 use crate::video::texture::VideoTexture;
@@ -69,14 +69,11 @@ impl ApplicationHandler for App {
             renderer.prepare_for_xr(vr.swapchain_format);
         }
 
-        // Use the XR swapchain format when available, otherwise the
-        // desktop surface format (so pipeline target formats match).
         let target_fmt = vr
             .as_ref()
             .map(|v| v.swapchain_format)
             .unwrap_or_else(|| renderer.surface_format());
 
-        // Open the video file and create GPU resources for it.
         if let Some(ref path) = self.video_path {
             match VideoDecoder::open(path.clone()) {
                 Err(e) => eprintln!("Failed to open video: {e}"),
@@ -89,9 +86,14 @@ impl ApplicationHandler for App {
                         decoder.height,
                     );
 
-                    // Seed the video name from the file stem.
                     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                         self.control_bar_state.video_name = stem.to_owned();
+                    }
+
+                    // Seed duration if already known at open time.
+                    if decoder.duration_us > 0 {
+                        self.control_bar_state.duration_secs =
+                            decoder.duration_us as f64 / 1_000_000.0;
                     }
 
                     self.video_decoder = Some(decoder);
@@ -101,7 +103,6 @@ impl ApplicationHandler for App {
             }
         }
 
-        // Control bar panel: 800×160 px, 1.0 m wide, positioned below the video.
         self.panel_renderer = Some(PanelRenderer::new(
             &renderer.device,
             target_fmt,
@@ -144,6 +145,16 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         let Some(renderer) = &self.renderer else { return };
 
+        // Sync duration once the decoder has it (it arrives async from the media source).
+        if self.control_bar_state.duration_secs == 0.0 {
+            if let Some(dec) = &self.video_decoder {
+                if dec.duration_us > 0 {
+                    self.control_bar_state.duration_secs =
+                        dec.duration_us as f64 / 1_000_000.0;
+                }
+            }
+        }
+
         // Upload the latest decoded frame if one is available.
         if let (Some(decoder), Some(texture), Some(vr_rend)) = (
             &self.video_decoder,
@@ -155,7 +166,6 @@ impl ApplicationHandler for App {
                 vr_rend.set_texture(&renderer.device, texture);
             }
 
-            // Update playback position for the control bar.
             let pts_us = decoder.current_pts_us.load(Ordering::Relaxed);
             self.control_bar_state.current_secs = pts_us as f64 / 1_000_000.0;
         }
@@ -179,10 +189,69 @@ impl ApplicationHandler for App {
                 self.pointer_renderer.as_ref(),
             );
 
-            // Handle control bar actions.
+            // ── handle control bar actions ─────────────────────────────────
+
             if actions.play_pause {
                 self.control_bar_state.is_playing = !self.control_bar_state.is_playing;
+                if let Some(dec) = &self.video_decoder {
+                    dec.paused.store(!self.control_bar_state.is_playing, Ordering::Relaxed);
+                }
             }
+
+            if actions.cycle_speed {
+                self.control_bar_state.speed_index =
+                    (self.control_bar_state.speed_index + 1) % SPEEDS.len();
+                if let Some(dec) = &self.video_decoder {
+                    dec.speed_index.store(
+                        self.control_bar_state.speed_index as u32,
+                        Ordering::Relaxed,
+                    );
+                }
+            }
+
+            if actions.cycle_loop {
+                let current_us = self
+                    .video_decoder
+                    .as_ref()
+                    .map(|d| d.current_pts_us.load(Ordering::Relaxed))
+                    .unwrap_or(0);
+
+                match self.control_bar_state.loop_state {
+                    0 => {
+                        // First click — set loop start.
+                        if let Some(dec) = &self.video_decoder {
+                            dec.loop_start_us.store(current_us, Ordering::Relaxed);
+                            dec.loop_state.store(1, Ordering::Relaxed);
+                        }
+                        self.control_bar_state.loop_state = 1;
+                    }
+                    1 => {
+                        // Second click — set loop end and activate.
+                        if let Some(dec) = &self.video_decoder {
+                            dec.loop_end_us.store(current_us, Ordering::Relaxed);
+                            dec.loop_state.store(2, Ordering::Relaxed);
+                        }
+                        self.control_bar_state.loop_state = 2;
+                    }
+                    _ => {
+                        // Third click — clear loop.
+                        if let Some(dec) = &self.video_decoder {
+                            dec.loop_state.store(0, Ordering::Relaxed);
+                        }
+                        self.control_bar_state.loop_state = 0;
+                    }
+                }
+            }
+
+            if let Some(frac) = actions.seek_frac {
+                if let Some(dec) = &self.video_decoder {
+                    if dec.duration_us > 0 {
+                        let target_us = (frac as f64 * dec.duration_us as f64) as u64;
+                        *dec.seek_request.lock().unwrap() = Some(target_us);
+                    }
+                }
+            }
+
             if actions.exit {
                 vr.request_exit();
             }

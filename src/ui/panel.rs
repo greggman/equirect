@@ -90,6 +90,10 @@ impl PanelRenderer {
 
         // ── egui ──────────────────────────────────────────────────────────
         let egui_ctx = egui::Context::default();
+        // VR controllers have natural hand tremor; the default 6px threshold is too
+        // tight and causes clicks to be silently dropped.  200px is generous enough
+        // to survive any realistic controller movement while pressing a button.
+        egui_ctx.options_mut(|o| o.input_options.max_click_dist = 200.0);
         let egui_renderer = egui_wgpu::Renderer::new(device, offscreen_fmt, egui_wgpu::RendererOptions::default());
 
         // ── camera bind group layout ──────────────────────────────────────
@@ -305,10 +309,15 @@ impl PanelRenderer {
             }
         }
 
+        // `just_released`: the one frame where the select button went pressed→released
+        // while the cursor was on the panel.  Passed to draw() so buttons can fire
+        // reliably without going through egui's internal click-distance gating.
+        let just_released = !new_clicking && self.prev_clicking && new_pos.is_some();
+
         match (self.cursor_pos, new_pos) {
             (_, Some(pos)) => {
                 events.push(egui::Event::PointerMoved(pos));
-                // Click press
+                // Press / release events are still injected so the Slider can drag.
                 if new_clicking && !self.prev_clicking {
                     events.push(egui::Event::PointerButton {
                         pos,
@@ -317,7 +326,6 @@ impl PanelRenderer {
                         modifiers: egui::Modifiers::NONE,
                     });
                 }
-                // Click release
                 if !new_clicking && self.prev_clicking {
                     events.push(egui::Event::PointerButton {
                         pos,
@@ -328,7 +336,6 @@ impl PanelRenderer {
                 }
             }
             (Some(_), None) => {
-                // Pointer left the panel.
                 events.push(egui::Event::PointerGone);
             }
             (None, None) => {}
@@ -361,7 +368,7 @@ impl PanelRenderer {
                         .inner_margin(egui::Margin::same(8)),
                 )
                 .show(ctx, |ui| {
-                    actions = draw(ui, state);
+                    actions = draw(ui, state, just_released);
                 });
         });
 

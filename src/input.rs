@@ -41,11 +41,12 @@ impl XrInput {
             .ok()?;
 
         let click_action = action_set
-            .create_action::<bool>("trigger_click", "Trigger Click", &hand_paths)
-            .map_err(|e| eprintln!("XR input: create trigger_click: {e}"))
+            .create_action::<bool>("select_click", "Select Click", &hand_paths)
+            .map_err(|e| eprintln!("XR input: create select_click: {e}"))
             .ok()?;
 
         // ── Oculus / Meta Touch controller bindings ────────────────────────
+        // A (right) and X (left) are the primary face buttons used for selection.
         if let Ok(profile) = instance
             .string_to_path("/interaction_profiles/oculus/touch_controller")
         {
@@ -53,8 +54,8 @@ impl XrInput {
             if let (Some(la), Some(ra), Some(lc), Some(rc)) = (
                 make_path("/user/hand/left/input/aim/pose"),
                 make_path("/user/hand/right/input/aim/pose"),
-                make_path("/user/hand/left/input/trigger/value"),
-                make_path("/user/hand/right/input/trigger/value"),
+                make_path("/user/hand/left/input/x/click"),
+                make_path("/user/hand/right/input/a/click"),
             ) {
                 let _ = instance.suggest_interaction_profile_bindings(
                     profile,

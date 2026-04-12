@@ -8,7 +8,8 @@ pub struct ControlBarState {
     pub duration_secs: f64,
     /// Index into SPEEDS.
     pub speed_index: usize,
-    pub loop_active: bool,
+    /// Loop state: 0 = off, 1 = start set, 2 = active (start + end set).
+    pub loop_state: u8,
 }
 
 pub const SPEEDS: [f32; 5] = [1.0, 2.0 / 3.0, 0.5, 1.0 / 3.0, 0.25];
@@ -22,13 +23,12 @@ impl Default for ControlBarState {
             current_secs: 0.0,
             duration_secs: 0.0,
             speed_index: 0,
-            loop_active: false,
+            loop_state: 0,
         }
     }
 }
 
 /// Actions that the control bar UI wants the app to perform.
-/// Populated by `draw` and consumed by the caller.
 #[derive(Default)]
 pub struct ControlBarActions {
     pub play_pause: bool,
@@ -43,10 +43,13 @@ pub struct ControlBarActions {
     pub seek_frac: Option<f32>,
 }
 
-pub fn draw(ui: &mut egui::Ui, state: &ControlBarState) -> ControlBarActions {
+/// `just_released` — true on the single frame the controller select button
+/// went from pressed → released.  We use this instead of egui's `clicked()`
+/// because egui's internal click-distance gating can silently drop clicks when
+/// the VR controller tremors between press and release.
+pub fn draw(ui: &mut egui::Ui, state: &ControlBarState, just_released: bool) -> ControlBarActions {
     let mut actions = ControlBarActions::default();
 
-    // Slightly larger text for VR legibility.
     let font_id = egui::FontId::proportional(22.0);
     let btn_style = egui::TextStyle::Button;
 
@@ -55,24 +58,28 @@ pub fn draw(ui: &mut egui::Ui, state: &ControlBarState) -> ControlBarActions {
         ui.style_mut().text_styles.insert(btn_style.clone(), font_id.clone());
         ui.spacing_mut().button_padding = egui::vec2(12.0, 8.0);
 
-        if ui.button("◀◀").clicked() { actions.prev = true; }
+        // We check `hovered()` instead of `clicked()`: hovered() is exactly
+        // what drives the button highlight, and we own the press/release edge.
+        if ui.button("◀◀").hovered() && just_released { actions.prev = true; }
 
         let play_label = if state.is_playing { "⏸" } else { "▶" };
-        if ui.button(play_label).clicked() { actions.play_pause = true; }
+        if ui.button(play_label).hovered() && just_released { actions.play_pause = true; }
 
-        if ui.button("▶▶").clicked() { actions.next = true; }
+        if ui.button("▶▶").hovered() && just_released { actions.next = true; }
 
         let speed_label = SPEED_LABELS[state.speed_index];
-        if ui.button(speed_label).clicked() { actions.cycle_speed = true; }
+        if ui.button(speed_label).hovered() && just_released { actions.cycle_speed = true; }
 
-        let loop_label = if state.loop_active { "↩●" } else { "↩" };
-        if ui.button(loop_label).clicked() { actions.cycle_loop = true; }
+        let loop_label = match state.loop_state {
+            0 => "↩",
+            1 => "↩·",
+            _ => "↩●",
+        };
+        if ui.button(loop_label).hovered() && just_released { actions.cycle_loop = true; }
 
-        if ui.button("⚙").clicked() { actions.show_settings = true; }
-
-        if ui.button("≡").clicked() { actions.show_browser = true; }
-
-        if ui.button("✕").clicked() { actions.exit = true; }
+        if ui.button("⚙").hovered() && just_released { actions.show_settings = true; }
+        if ui.button("≡").hovered() && just_released { actions.show_browser = true; }
+        if ui.button("✕").hovered() && just_released { actions.exit = true; }
     });
 
     // ── video name ────────────────────────────────────────────────────────
@@ -82,23 +89,32 @@ pub fn draw(ui: &mut egui::Ui, state: &ControlBarState) -> ControlBarActions {
             .color(egui::Color32::WHITE),
     );
 
-    // ── progress bar / scrubber ───────────────────────────────────────────
-    ui.horizontal(|ui| {
-        let time_label = format!(
-            "{} / {}",
-            fmt_time(state.current_secs),
-            if state.duration_secs > 0.0 { fmt_time(state.duration_secs) } else { "--:--".into() }
-        );
+    // ── time display ──────────────────────────────────────────────────────
+    let time_label = format!(
+        "{} / {}",
+        fmt_time(state.current_secs),
+        if state.duration_secs > 0.0 { fmt_time(state.duration_secs) } else { "--:--".into() }
+    );
+    ui.label(egui::RichText::new(time_label).font(font_id.clone()).color(egui::Color32::WHITE));
 
-        let frac = if state.duration_secs > 0.0 {
+    // ── seek scrubber (full width) ────────────────────────────────────────
+    {
+        let mut frac = if state.duration_secs > 0.0 {
             (state.current_secs / state.duration_secs).clamp(0.0, 1.0) as f32
         } else {
             0.0
         };
 
-        let bar = egui::ProgressBar::new(frac).text(time_label).desired_width(ui.available_width());
-        ui.add(bar);
-    });
+        let resp = ui.add_sized(
+            [ui.available_width(), 24.0],
+            egui::Slider::new(&mut frac, 0.0f32..=1.0f32)
+                .show_value(false)
+                .trailing_fill(true),
+        );
+        if resp.changed() {
+            actions.seek_frac = Some(frac);
+        }
+    }
 
     actions
 }
