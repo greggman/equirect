@@ -78,6 +78,7 @@ pub fn draw(
     state: &mut BrowserState,
     interaction: Option<(egui::Pos2, egui::Pos2)>,
 ) -> BrowserActions {
+    use super::icons;
     use super::ResponseExt as _;
     let mut actions = BrowserActions::default();
 
@@ -95,9 +96,8 @@ pub fn draw(
     ui.style_mut().spacing.scroll.bar_width = 20.0;
     ui.style_mut().spacing.scroll.floating  = false;
 
-    // ── header: path + Cancel ─────────────────────────────────────────────
+    // ── header: path + close ──────────────────────────────────────────────
     ui.horizontal(|ui| {
-        ui.style_mut().text_styles.insert(egui::TextStyle::Button, font.clone());
         ui.spacing_mut().button_padding = btn_pad;
 
         ui.label(
@@ -106,7 +106,8 @@ pub fn draw(
                 .color(egui::Color32::LIGHT_GRAY),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Cancel").activated_by(interaction) {
+            ui.spacing_mut().button_padding = egui::vec2(6.0, 6.0);
+            if icons::icon_button(ui, icons::ICON_CLOSE, 24.0, interaction) {
                 actions.close = true;
             }
         });

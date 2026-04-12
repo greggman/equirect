@@ -1,5 +1,6 @@
 pub mod browser;
 pub mod control_bar;
+pub mod icons;
 pub mod panel;
 pub mod settings;
 

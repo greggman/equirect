@@ -13,7 +13,6 @@ pub struct ControlBarState {
 }
 
 pub const SPEEDS: [f32; 5] = [1.0, 2.0 / 3.0, 0.5, 1.0 / 3.0, 0.25];
-pub const SPEED_LABELS: [&str; 5] = ["1x", "2/3x", "1/2x", "1/3x", "1/4x"];
 
 impl Default for ControlBarState {
     fn default() -> Self {
@@ -55,37 +54,44 @@ pub struct ControlBarActions {
 /// Returns true if `press_pos` falls inside `resp`'s rect — the definition of
 /// pointer capture: only the widget the button was pressed on may fire.
 pub fn draw(ui: &mut egui::Ui, state: &ControlBarState, interaction: Option<(egui::Pos2, egui::Pos2)>) -> ControlBarActions {
-    use super::ResponseExt as _;
+    use super::icons;
     let mut actions = ControlBarActions::default();
 
     let font_id = egui::FontId::proportional(22.0);
-    let btn_style = egui::TextStyle::Button;
 
     // ── icon row ──────────────────────────────────────────────────────────
+    const ICON_SIZE: f32 = 32.0;
+
     ui.horizontal(|ui| {
-        ui.style_mut().text_styles.insert(btn_style.clone(), font_id.clone());
-        ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
+        ui.spacing_mut().button_padding = egui::vec2(8.0, 6.0);
 
-        if ui.button("◀◀").activated_by(interaction)        { actions.prev = true; }
+        if icons::icon_button(ui, icons::ICON_PREV, ICON_SIZE, interaction) { actions.prev = true; }
 
-        let play_label = if state.is_playing { "⏸" } else { "▶" };
-        if ui.button(play_label).activated_by(interaction)   { actions.play_pause = true; }
+        let play_sprite = if state.is_playing { icons::ICON_PAUSE } else { icons::ICON_PLAY };
+        if icons::icon_button(ui, play_sprite, ICON_SIZE, interaction) { actions.play_pause = true; }
 
-        if ui.button("▶▶").activated_by(interaction)         { actions.next = true; }
+        if icons::icon_button(ui, icons::ICON_NEXT, ICON_SIZE, interaction) { actions.next = true; }
 
-        let speed_label = SPEED_LABELS[state.speed_index];
-        if ui.button(speed_label).activated_by(interaction)  { actions.cycle_speed = true; }
-
-        let loop_label = match state.loop_state {
-            0 => "↩",
-            1 => "↩·",
-            _ => "↩●",
+        let speed_sprite = match state.speed_index {
+            0 => icons::ICON_SPEED_1X,
+            1 => icons::ICON_SPEED__66X,
+            2 => icons::ICON_SPEED__5X,
+            3 => icons::ICON_SPEED__33X,
+            _ => icons::ICON_SPEED__25X,
         };
-        if ui.button(loop_label).activated_by(interaction)   { actions.cycle_loop = true; }
+        if icons::icon_button(ui, speed_sprite, ICON_SIZE, interaction) { actions.cycle_speed = true; }
 
-        if ui.button("⚙").activated_by(interaction) { actions.show_settings = true; }
-        if ui.button("≡").activated_by(interaction) { actions.show_browser = true; }
-        if ui.button("✕").activated_by(interaction) { actions.exit = true; }
+        let loop_sprite = match state.loop_state {
+            0 => icons::ICON_LOOP_0,
+            1 => icons::ICON_LOOP_1,
+            _ => icons::ICON_LOOP_2,
+        };
+        let loop_active = state.loop_state > 0;
+        if icons::icon_button_selected(ui, loop_sprite, loop_active, ICON_SIZE, interaction) { actions.cycle_loop = true; }
+
+        if icons::icon_button(ui, icons::ICON_SETTINGS, ICON_SIZE, interaction) { actions.show_settings = true; }
+        if icons::icon_button(ui, icons::ICON_FOLDER,   ICON_SIZE, interaction) { actions.show_browser = true; }
+        if icons::icon_button(ui, icons::ICON_EXIT,     ICON_SIZE, interaction) { actions.exit = true; }
     });
 
     // ── video name ────────────────────────────────────────────────────────
