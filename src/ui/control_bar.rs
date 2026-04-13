@@ -1,6 +1,7 @@
 /// Persistent state for the control bar panel.
 pub struct ControlBarState {
     pub video_name: String,
+    pub error: Option<String>,
     pub is_playing: bool,
     /// Current playback position in seconds.
     pub current_secs: f64,
@@ -18,6 +19,7 @@ impl Default for ControlBarState {
     fn default() -> Self {
         Self {
             video_name: String::new(),
+            error: None,
             is_playing: true,
             current_secs: 0.0,
             duration_secs: 0.0,
@@ -94,12 +96,20 @@ pub fn draw(ui: &mut egui::Ui, state: &ControlBarState, interaction: Option<(egu
         if icons::icon_button(ui, icons::ICON_EXIT,     ICON_SIZE, interaction) { actions.exit = true; }
     });
 
-    // ── video name ────────────────────────────────────────────────────────
-    ui.label(
-        egui::RichText::new(state.video_name.as_str())
-            .font(font_id.clone())
-            .color(egui::Color32::WHITE),
-    );
+    // ── video name / error ────────────────────────────────────────────────
+    if let Some(ref err) = state.error {
+        ui.label(
+            egui::RichText::new(err.as_str())
+                .font(font_id.clone())
+                .color(egui::Color32::RED),
+        );
+    } else {
+        ui.label(
+            egui::RichText::new(state.video_name.as_str())
+                .font(font_id.clone())
+                .color(egui::Color32::WHITE),
+        );
+    }
 
     // ── seek scrubber + time (same row) ──────────────────────────────────
     let time_label = format!(

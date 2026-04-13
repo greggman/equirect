@@ -155,8 +155,12 @@ impl ApplicationHandler for App {
                 self.video_settings = meta.settings;
             }
             match VideoDecoder::open(path.clone()) {
-                Err(e) => eprintln!("Failed to open video: {e}"),
+                Err(e) => {
+                    self.control_bar_state.error = Some(format!("Can't play video: {e}"));
+                    self.panel_mode = PanelMode::ControlBar;
+                }
                 Ok(decoder) => {
+                    self.control_bar_state.error = None;
                     let tex = VideoTexture::new(&renderer.device, decoder.width, decoder.height, decoder.is_nv12);
                     // VideoRenderer is only used for the fisheye shader fallback.
                     let vr_rend = VideoRenderer::new(
@@ -420,8 +424,13 @@ impl ApplicationHandler for App {
                 self.video_renderer  = None;
 
                 match VideoDecoder::open(new_path.clone()) {
-                    Err(e) => eprintln!("Failed to open video: {e}"),
+                    Err(e) => {
+                        self.control_bar_state.error = Some(format!("Can't play video: {e}"));
+                        self.panel_mode = PanelMode::ControlBar;
+                        self.video_path = Some(new_path);
+                    }
                     Ok(decoder) => {
+                        self.control_bar_state.error = None;
                         let tex = VideoTexture::new(
                             &renderer.device, decoder.width, decoder.height, decoder.is_nv12,
                         );
@@ -589,8 +598,13 @@ impl ApplicationHandler for App {
                     self.video_renderer  = None;
 
                     match crate::video::decoder::VideoDecoder::open(new_path.clone()) {
-                        Err(e) => eprintln!("Failed to open video: {e}"),
+                        Err(e) => {
+                            self.control_bar_state.error = Some(format!("Can't play video: {e}"));
+                            self.panel_mode = PanelMode::ControlBar;
+                            self.video_path = Some(new_path);
+                        }
                         Ok(decoder) => {
+                            self.control_bar_state.error = None;
                             let tex = crate::video::texture::VideoTexture::new(
                                 &renderer.device, decoder.width, decoder.height, decoder.is_nv12,
                             );
