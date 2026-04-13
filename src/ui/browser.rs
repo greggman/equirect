@@ -64,6 +64,9 @@ pub struct BrowserState {
     /// Set to true after creation or navigation; causes the list to scroll to
     /// the current video on the next draw.
     pub needs_scroll_to_current: bool,
+    /// Set to true when entries are freshly loaded (not served from cache).
+    /// The app reads this to update the folder cache, then clears it.
+    pub just_loaded: bool,
     // Async loading state for remote locations.
     loading_rx: Option<std::sync::mpsc::Receiver<Result<Vec<BrowserEntry>, String>>>,
     pub is_loading:  bool,
@@ -74,7 +77,10 @@ pub struct BrowserState {
 #[derive(Default)]
 pub struct BrowserActions {
     pub play:          Option<Location>,
+    /// Navigate via ".." (go up) — destination may be served from cache.
     pub navigate:      Option<Location>,
+    /// User explicitly clicked a folder in the list — invalidate its cache entry.
+    pub select_dir:    Option<Location>,
     pub close:         bool,
     /// The root path of the volume the user selected in the volumes popup.
     /// The app resolves which directory to navigate to within that volume.
@@ -82,26 +88,40 @@ pub struct BrowserActions {
 }
 
 impl BrowserState {
-    pub fn new(location: Location, current_video: Option<Location>) -> Self {
+    /// `cached`: pre-loaded entries from the folder cache; if `Some`, skip the
+    /// actual read.  Pass `None` to always read fresh.
+    pub fn new(location: Location, current_video: Option<Location>, cached: Option<Vec<BrowserEntry>>) -> Self {
         let mut s = Self {
             location,
             entries: Vec::new(),
             current_video,
             needs_scroll_to_current: true,
+            just_loaded: false,
             loading_rx: None,
             is_loading: false,
             load_error: None,
         };
-        s.start_load();
+        if let Some(entries) = cached {
+            s.entries = entries;
+        } else {
+            s.start_load();
+        }
         s
     }
 
-    pub fn navigate_to(&mut self, location: Location) {
+    /// Navigate to `location`.  Pass cached entries to skip the real read, or
+    /// `None` to always read fresh (e.g. after cache invalidation).
+    pub fn navigate_to(&mut self, location: Location, cached: Option<Vec<BrowserEntry>>) {
         self.location                = location;
         self.entries                 = Vec::new();
         self.load_error              = None;
         self.needs_scroll_to_current = false;
-        self.start_load();
+        self.just_loaded             = false;
+        if let Some(entries) = cached {
+            self.entries = entries;
+        } else {
+            self.start_load();
+        }
     }
 
     /// Call once per frame.  If an async remote load has completed, populate
@@ -113,8 +133,9 @@ impl BrowserState {
             self.is_loading = false;
             match result {
                 Ok(entries) => {
-                    self.entries    = entries;
-                    self.load_error = None;
+                    self.entries     = entries;
+                    self.load_error  = None;
+                    self.just_loaded = true;
                 }
                 Err(e) => self.load_error = Some(e),
             }
@@ -129,6 +150,7 @@ impl BrowserState {
                 self.is_loading = false;
                 self.loading_rx = None;
                 self.refresh_local(&path);
+                self.just_loaded = true;
             }
             Location::Remote(url) => {
                 self.is_loading = true;
@@ -315,27 +337,30 @@ pub fn draw(
 
         for entry in &state.entries {
             let w = ui.available_width();
-            let (display, is_selected, text_color, navigate_to, play_loc):
-                (String, bool, egui::Color32, Option<Location>, Option<Location>) = match entry
+            // (display, is_selected, text_color, navigate_up, select_dir, play)
+            let (display, is_selected, text_color, navigate_up, select_dir, play_loc):
+                (String, bool, egui::Color32, Option<Location>, Option<Location>, Option<Location>) = match entry
             {
                 BrowserEntry::Parent => (
                     "..".to_string(),
                     false,
                     egui::Color32::WHITE,
-                    parent_loc.clone(),
+                    parent_loc.clone(), // go up — use cache
+                    None,
                     None,
                 ),
                 BrowserEntry::Dir(name, loc) => (
                     format!("📁  {name}"),
                     false,
                     egui::Color32::WHITE,
-                    Some(loc.clone()),
+                    None,
+                    Some(loc.clone()), // explicit folder click — invalidate cache
                     None,
                 ),
                 BrowserEntry::Video(name, loc) => {
                     let is_cur = current_video.as_ref() == Some(loc);
                     let color  = if is_cur { egui::Color32::YELLOW } else { egui::Color32::WHITE };
-                    (name.clone(), is_cur, color, None, Some(loc.clone()))
+                    (name.clone(), is_cur, color, None, None, Some(loc.clone()))
                 }
             };
 
@@ -363,8 +388,9 @@ pub fn draw(
                 );
             }
             if resp.activated_by(clipped_interaction) {
-                if let Some(loc) = navigate_to { actions.navigate = Some(loc); }
-                if let Some(loc) = play_loc    { actions.play     = Some(loc); }
+                if let Some(loc) = navigate_up { actions.navigate    = Some(loc); }
+                if let Some(loc) = select_dir  { actions.select_dir  = Some(loc); }
+                if let Some(loc) = play_loc    { actions.play        = Some(loc); }
             }
         }
     });

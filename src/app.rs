@@ -11,7 +11,7 @@ use winit::{
 
 use crate::pointer_renderer::PointerRenderer;
 use crate::renderer::Renderer;
-use crate::ui::browser::{BrowserState, Location, VIDEO_EXTS};
+use crate::ui::browser::{BrowserEntry, BrowserState, Location, VIDEO_EXTS};
 use crate::ui::settings::VideoSettings;
 use crate::video_layer::{VideoSwapchain, use_xr_layer};
 use crate::video_meta;
@@ -41,6 +41,13 @@ fn source_to_location(s: &str) -> Location {
         Location::Remote(s.to_string())
     } else {
         Location::Local(PathBuf::from(s))
+    }
+}
+
+fn cache_key(loc: &Location) -> String {
+    match loc {
+        Location::Local(p)  => p.to_string_lossy().into_owned(),
+        Location::Remote(u) => u.trim_end_matches('/').to_string(),
     }
 }
 
@@ -124,6 +131,10 @@ pub struct App {
     // File browser
     browser_state: Option<BrowserState>,
     browser_panel: Option<PanelRenderer>,
+    /// Cached folder contents keyed by normalized location string.
+    /// Persists across browser open/close cycles.  Entries are invalidated
+    /// when the user explicitly clicks a folder to enter it.
+    folder_cache: std::collections::HashMap<String, Vec<BrowserEntry>>,
     /// Directory to show in the browser at startup; consumed on first use.
     initial_browser_dir: Option<PathBuf>,
     // Settings
@@ -159,6 +170,7 @@ impl App {
             video_source,
             browser_state: None,
             browser_panel: None,
+            folder_cache: std::collections::HashMap::new(),
             initial_browser_dir,
             video_settings: VideoSettings::new(),
             settings_panel: None,
@@ -245,7 +257,9 @@ impl ApplicationHandler for App {
 
         if let Some(dir) = self.initial_browser_dir.take() {
             let current_loc = self.video_source.as_deref().map(source_to_location);
-            self.browser_state = Some(BrowserState::new(Location::Local(dir), current_loc));
+            let loc = Location::Local(dir);
+            let cached = self.folder_cache.get(&cache_key(&loc)).cloned();
+            self.browser_state = Some(BrowserState::new(loc, current_loc, cached));
             self.browser_panel = Some(PanelRenderer::new(
                 &renderer.device, target_fmt,
                 800, 600,
@@ -368,14 +382,29 @@ impl ApplicationHandler for App {
                 self.panel_mode    = PanelMode::ControlBar;
             }
 
+            // ".." / parent navigation — use cache.
             if let Some(loc) = browser_actions.navigate {
                 if let Some(dir) = loc.as_local() {
                     let vol_root = crate::volumes::volume_root_of(dir);
                     video_meta::save_last_dir(dir);
                     video_meta::save_volume_last_dir(&vol_root, dir);
                 }
+                let cached = self.folder_cache.get(&cache_key(&loc)).cloned();
                 if let Some(bs) = &mut self.browser_state {
-                    bs.navigate_to(loc);
+                    bs.navigate_to(loc, cached);
+                }
+            }
+
+            // Explicit folder click — invalidate that folder's cache entry.
+            if let Some(loc) = browser_actions.select_dir {
+                if let Some(dir) = loc.as_local() {
+                    let vol_root = crate::volumes::volume_root_of(dir);
+                    video_meta::save_last_dir(dir);
+                    video_meta::save_volume_last_dir(&vol_root, dir);
+                }
+                self.folder_cache.remove(&cache_key(&loc));
+                if let Some(bs) = &mut self.browser_state {
+                    bs.navigate_to(loc, None);
                 }
             }
 
@@ -388,8 +417,18 @@ impl ApplicationHandler for App {
                 }
                 let target = video_meta::resolve_dir_for_volume(&vol_root);
                 video_meta::save_last_dir(&target);
+                let loc = Location::Local(target);
+                let cached = self.folder_cache.get(&cache_key(&loc)).cloned();
                 if let Some(bs) = &mut self.browser_state {
-                    bs.navigate_to(Location::Local(target));
+                    bs.navigate_to(loc, cached);
+                }
+            }
+
+            // Write freshly-loaded entries into the cache.
+            if let Some(bs) = &mut self.browser_state {
+                if bs.just_loaded {
+                    self.folder_cache.insert(cache_key(&bs.location), bs.entries.clone());
+                    bs.just_loaded = false;
                 }
             }
 
@@ -634,7 +673,8 @@ impl ApplicationHandler for App {
                         None => Location::Local(std::env::current_dir().unwrap_or_default()),
                     };
                     let current_loc = self.video_source.as_deref().map(source_to_location);
-                    self.browser_state = Some(BrowserState::new(start_loc, current_loc));
+                    let cached = self.folder_cache.get(&cache_key(&start_loc)).cloned();
+                    self.browser_state = Some(BrowserState::new(start_loc, current_loc, cached));
                     self.browser_panel = Some(PanelRenderer::new(
                         &renderer.device, vr.swapchain_format,
                         800, 600,
