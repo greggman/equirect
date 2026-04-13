@@ -117,6 +117,7 @@ Features:
 [*] Icon in windows task bar
 [*] webm
 [*] installer
+[*] Show the version somewhere
 
 [ ] Make it run on Quest - add SMB support
   [ ] need settings to have way to add "roots" where each root is a SMB or webdav or HTTP

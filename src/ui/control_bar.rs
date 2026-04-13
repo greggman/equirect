@@ -96,20 +96,24 @@ pub fn draw(ui: &mut egui::Ui, state: &ControlBarState, interaction: Option<(egu
         if icons::icon_button(ui, icons::ICON_EXIT,     ICON_SIZE, interaction) { actions.exit = true; }
     });
 
-    // ── video name / error ────────────────────────────────────────────────
-    if let Some(ref err) = state.error {
-        ui.label(
-            egui::RichText::new(err.as_str())
-                .font(font_id.clone())
-                .color(egui::Color32::RED),
-        );
-    } else {
-        ui.label(
-            egui::RichText::new(state.video_name.as_str())
-                .font(font_id.clone())
-                .color(egui::Color32::WHITE),
-        );
-    }
+    // ── video name / error  +  app version (same row) ────────────────────
+    ui.horizontal(|ui| {
+        let text = if let Some(ref err) = state.error {
+            egui::RichText::new(err.as_str()).font(font_id.clone()).color(egui::Color32::RED)
+        } else {
+            egui::RichText::new(state.video_name.as_str()).font(font_id.clone()).color(egui::Color32::WHITE)
+        };
+        ui.label(text);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(concat!(
+                    env!("CARGO_PKG_NAME"), " v", env!("CARGO_PKG_VERSION")
+                ))
+                .font(egui::FontId::proportional(12.0))
+                .color(egui::Color32::DARK_GRAY),
+            );
+        });
+    });
 
     // ── seek scrubber + time (same row) ──────────────────────────────────
     let time_label = format!(
