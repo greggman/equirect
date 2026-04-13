@@ -445,7 +445,7 @@ impl PanelRenderer {
                 .frame(
                     egui::Frame::new()
                         .fill(egui::Color32::from_rgba_unmultiplied(15, 15, 15, 220))
-                        .inner_margin(egui::Margin { left: 0, right: 0, top: 6, bottom: 6 }),
+                        .inner_margin(egui::Margin { left: 12, right: 12, top: 6, bottom: 6 }),
                 )
                 .show(ctx, |ui| {
                     if let Some(f) = draw_fn_opt.take() {
