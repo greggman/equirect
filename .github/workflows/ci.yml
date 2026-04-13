@@ -41,7 +41,11 @@ jobs:
           key: cargo-packager-0.11.8
 
       - name: Install cargo-packager
-        run: cargo install cargo-packager --locked --version 0.11.8
+        run: |
+          if (-not (Get-Command cargo-packager -ErrorAction SilentlyContinue)) {
+            cargo install cargo-packager --locked --version 0.11.8
+          }
+        shell: pwsh
 
       - name: Package
         run: cargo packager --release
