@@ -180,9 +180,7 @@ impl VrPreInit {
     pub fn new() -> Option<Self> {
         vprintln!("XR: loading OpenXR...");
 
-        let xr_entry = unsafe { xr::Entry::load() }
-            .map_err(|e| eprintln!("XR: loader not found: {e}"))
-            .ok()?;
+        let xr_entry = xr::Entry::linked();
 
         let exts = xr_entry
             .enumerate_extensions()
