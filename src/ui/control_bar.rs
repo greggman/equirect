@@ -60,7 +60,7 @@ pub fn draw(ui: &mut egui::Ui, state: &ControlBarState, interaction: Option<(egu
     let font_id = egui::FontId::proportional(22.0);
 
     // ── icon row ──────────────────────────────────────────────────────────
-    const ICON_SIZE: f32 = 32.0;
+    const ICON_SIZE: f32 = 64.0;
 
     ui.horizontal(|ui| {
         ui.spacing_mut().button_padding = egui::vec2(8.0, 6.0);

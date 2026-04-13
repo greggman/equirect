@@ -192,10 +192,10 @@ impl ApplicationHandler for App {
         self.panel_renderer = Some(PanelRenderer::new(
             &renderer.device,
             target_fmt,
-            800,
+            720,
             160,
             glam::Vec3::new(0.0, 0.0, -2.0),
-            2.0,
+            1.8,
             0.4,
         ));
 
