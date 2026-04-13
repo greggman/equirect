@@ -225,6 +225,43 @@ impl ApplicationHandler for App {
                 .expect("Failed to create window"),
         );
 
+        // Set title-bar (ICON_SMALL) and taskbar (ICON_BIG) icons by loading
+        // the icon embedded in the PE by build.rs/winresource (resource ID 1).
+        // SHChangeNotify is required to flush the shell's per-path icon cache;
+        // without it the taskbar shows a stale blank icon for the exe path.
+        #[cfg(target_os = "windows")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
+            use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+            use windows::Win32::UI::Shell::{SHChangeNotify, SHCNE_UPDATEITEM, SHCNF_PATHW, SHCNF_FLUSH};
+            use windows::Win32::UI::WindowsAndMessaging::{
+                LoadIconW, SendMessageW, SetClassLongPtrW,
+                WM_SETICON, ICON_BIG, ICON_SMALL, GCLP_HICON, GCLP_HICONSM,
+            };
+            use windows::core::PCWSTR;
+            if let Ok(exe) = std::env::current_exe() {
+                let wide: Vec<u16> = exe.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
+                unsafe { SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSH, Some(wide.as_ptr() as *const _), None); }
+            }
+            if let Ok(handle) = window.window_handle() {
+                if let RawWindowHandle::Win32(h) = handle.as_raw() {
+                    unsafe {
+                        let hwnd  = HWND(h.hwnd.get() as *mut core::ffi::c_void);
+                        let hmod  = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
+                        let hinst = Some(HINSTANCE(hmod.0));
+                        if let Ok(icon) = LoadIconW(hinst, PCWSTR(1 as *const u16)) {
+                            let lparam = Some(LPARAM(icon.0 as isize));
+                            SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG   as usize)), lparam);
+                            SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), lparam);
+                            SetClassLongPtrW(hwnd, GCLP_HICON,   icon.0 as isize);
+                            SetClassLongPtrW(hwnd, GCLP_HICONSM, icon.0 as isize);
+                        }
+                    }
+                }
+            }
+        }
+
         let vr_pre = VrPreInit::new();
         let xr_exts = vr_pre.as_ref().map(|v| v.required_device_extensions()).unwrap_or_default();
 
