@@ -871,14 +871,29 @@ impl VrContext {
                 let sub     = sc.sub_image(vs, i);
                 match mode {
                     EffectiveLayerMode::Quad => {
+                        // Cap portrait videos so they are never taller in world
+                        // space than a 16:9 landscape video at the same width.
+                        // A 16:9 source gives screen_h = 3.2 / (16/9) = 1.8 m.
+                        // A 9:16 source would give screen_h = 3.2 / (9/16) = 5.7 m.
+                        // Instead we scale both axes down to keep screen_h = 1.8 m,
+                        // giving a 1.0 m × 1.8 m panel — the correct aspect ratio,
+                        // just smaller.
+                        const REF_ASPECT: f32 = 16.0 / 9.0;
+                        let max_h = screen_w / REF_ASPECT;
+                        let (w, h) = if screen_h > max_h {
+                            let scale = max_h / screen_h;
+                            (screen_w * scale, max_h)
+                        } else {
+                            (screen_w, screen_h)
+                        };
                         quad_layers[i] = xr::CompositionLayerQuad::new()
                             .space(stage)
                             .eye_visibility(eye_vis)
                             .sub_image(sub)
                             .pose(oriented_pose(2.5, 1.0, self.base_orientation))
                             .size(xr::Extent2Df {
-                                width:  screen_w / zoom,
-                                height: screen_h / zoom,
+                                width:  w / zoom,
+                                height: h / zoom,
                             });
                     }
                     EffectiveLayerMode::Cylinder => {
