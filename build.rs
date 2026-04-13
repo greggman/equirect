@@ -78,7 +78,7 @@ fn build_windows_icon() {
 
         let mut icon_dir = ico::IconDir::new(ico::ResourceType::Icon);
 
-        for size in [16u32, 32, 48, 256] {
+        for size in [16u32, 32, 48, 256, 512] {
             // Fit the logo into a square canvas with transparent letterboxing.
             let sw = src.width();
             let sh = src.height();
