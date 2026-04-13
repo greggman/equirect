@@ -75,6 +75,7 @@ impl Drop for VideoDecoder {
 
 impl VideoDecoder {
     pub fn open(source: String) -> Result<Self> {
+
         // init message: (width, height, duration_us, is_nv12)
         let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(u32, u32, u64, bool)>>();
         let latest: Arc<Mutex<Option<VideoFrame>>> = Arc::new(Mutex::new(None));
@@ -364,14 +365,6 @@ fn open_and_decode(
     const FIRST_VIDEO: u32 = 0xFFFF_FFFC;
     const ALL_STREAMS: u32 = 0xFFFF_FFFE;
 
-    let wide: Vec<u16> = if source.starts_with("http://") || source.starts_with("https://") {
-        source.encode_utf16().chain([0u16]).collect()
-    } else {
-        use std::os::windows::ffi::OsStrExt;
-        std::path::Path::new(&source).as_os_str().encode_wide().chain([0u16]).collect()
-    };
-    let url = PCWSTR(wide.as_ptr());
-
     // MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS: use hardware MFTs (encoders/decoders).
     // NOTE: hardware VIDEO DECODE (DXVA2/D3D11VA) also requires MF_SOURCE_READER_D3D_MANAGER;
     // without a D3D device manager MF silently falls back to software decode.
@@ -380,68 +373,93 @@ fn open_and_decode(
         data4: [0x8d, 0x47, 0x46, 0x8d, 0x4e, 0x7e, 0xa6, 0xd7],
     };
 
-    let reader: IMFSourceReader = unsafe {
-        let mut attrs: Option<IMFAttributes> = None;
-        MFCreateAttributes(&mut attrs, 3)
-            .map_err(|e| anyhow!("MFCreateAttributes failed: {e}"))?;
-        let attrs = attrs.unwrap();
-        attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1).ok();
+    // Wide-string URL/path — built once, reused on each loop iteration.
+    let wide: Vec<u16> = if source.starts_with("http://") || source.starts_with("https://") {
+        source.encode_utf16().chain([0u16]).collect()
+    } else {
+        use std::os::windows::ffi::OsStrExt;
+        std::path::Path::new(&source).as_os_str().encode_wide().chain([0u16]).collect()
+    };
+    let url = PCWSTR(wide.as_ptr());
 
-        // Supply a D3D11 device manager so MF can use DXVA2/D3D11VA hardware decode.
-        // Without this, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS is a no-op for decode.
-        if let Ok(mgr) = create_dxgi_device_manager() {
-            attrs.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, &mgr).ok();
-            vprintln!("Video: D3D11 device manager attached (hardware decode enabled)");
-        } else {
-            vprintln!("Video: D3D11 device manager unavailable, falling back to software decode");
+    /// Open a fresh IMFSourceReader for the given URL, configured for video decode.
+    /// Returns (reader, format, width, height, duration_us).
+    fn open_reader(
+        url: PCWSTR,
+        source: &str,
+        mf_hw_guid: &windows::core::GUID,
+        first_video: u32,
+        all_streams: u32,
+    ) -> Result<(IMFSourceReader, DecodeFmt, u32, u32, u64)> {
+        use windows::Win32::Media::MediaFoundation::*;
+        unsafe {
+            let mut attrs: Option<IMFAttributes> = None;
+            MFCreateAttributes(&mut attrs, 3)
+                .map_err(|e| anyhow!("MFCreateAttributes failed: {e}"))?;
+            let attrs = attrs.unwrap();
+            attrs.SetUINT32(mf_hw_guid, 1).ok();
+
+            if let Ok(mgr) = create_dxgi_device_manager() {
+                attrs.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, &mgr).ok();
+                vprintln!("Video: D3D11 device manager attached (hardware decode enabled)");
+            } else {
+                vprintln!("Video: D3D11 device manager unavailable, falling back to software decode");
+            }
+
+            let reader: IMFSourceReader = MFCreateSourceReaderFromURL(url, Some(&attrs))
+                .map_err(|e| anyhow!("Open '{source:?}' failed: {e}"))?;
+
+            reader.SetStreamSelection(all_streams, false).ok();
+            reader.SetStreamSelection(first_video, true).ok();
+
+            // Validate native dimensions.
+            let native_type: IMFMediaType = reader
+                .GetNativeMediaType(first_video, 0)
+                .map_err(|e| anyhow!("GetNativeMediaType failed: {e}"))?;
+            let native_frame_size = native_type
+                .GetUINT64(&MF_MT_FRAME_SIZE)
+                .map_err(|e| anyhow!("GetUINT64(MF_MT_FRAME_SIZE) failed: {e}"))?;
+            if native_frame_size == 0
+                || (native_frame_size >> 32) == 0
+                || (native_frame_size & 0xFFFF_FFFF) == 0
+            {
+                return Err(anyhow!("Video has zero-size dimensions"));
+            }
+
+            let fmt = try_set_output_format(&reader, first_video)?;
+
+            let out_type: IMFMediaType = reader
+                .GetCurrentMediaType(first_video)
+                .map_err(|e| anyhow!("GetCurrentMediaType failed: {e}"))?;
+            let fs = out_type
+                .GetUINT64(&MF_MT_FRAME_SIZE)
+                .map_err(|e| anyhow!("GetUINT64(MF_MT_FRAME_SIZE) output type failed: {e}"))?;
+            let width  = (fs >> 32) as u32;
+            let height = (fs & 0xFFFF_FFFF) as u32;
+
+            vprintln!("Video: {width}x{height} (output), format: {fmt:?}");
+
+            let duration_us = query_duration_us(&reader);
+
+            Ok((reader, fmt, width, height, duration_us))
         }
-
-        MFCreateSourceReaderFromURL(url, Some(&attrs))
-            .map_err(|e| anyhow!("Open '{source:?}' failed: {e}"))?
-    };
-
-    unsafe {
-        reader.SetStreamSelection(ALL_STREAMS, false).ok();
-        reader.SetStreamSelection(FIRST_VIDEO, true).ok();
     }
 
-    // Read native dimensions just for the zero-check; real output dims come below.
-    let native_frame_size: u64 = unsafe {
-        let native_type: IMFMediaType = reader
-            .GetNativeMediaType(FIRST_VIDEO, 0)
-            .map_err(|e| anyhow!("GetNativeMediaType failed: {e}"))?;
-        native_type
-            .GetUINT64(&MF_MT_FRAME_SIZE)
-            .map_err(|e| anyhow!("GetUINT64(MF_MT_FRAME_SIZE) failed: {e}"))?
-    };
-    if native_frame_size == 0
-        || (native_frame_size >> 32) == 0
-        || (native_frame_size & 0xFFFF_FFFF) == 0
-    {
-        let _ = init_tx.send(Err(anyhow!("Video has zero-size dimensions")));
-        return Ok(());
-    }
-
-    let fmt = try_set_output_format(&reader, FIRST_VIDEO)?;
-
-    // After format conversion is configured, query the ACTUAL output dimensions.
-    // These may differ from the native (coded) dimensions because codecs often pad
-    // width/height to alignment boundaries (e.g. H.264 pads height to multiples of 16).
-    let (width, height) = unsafe {
-        let out_type: IMFMediaType = reader
-            .GetCurrentMediaType(FIRST_VIDEO)
-            .map_err(|e| anyhow!("GetCurrentMediaType failed: {e}"))?;
-        let fs = out_type
-            .GetUINT64(&MF_MT_FRAME_SIZE)
-            .map_err(|e| anyhow!("GetUINT64(MF_MT_FRAME_SIZE) output type failed: {e}"))?;
-        ((fs >> 32) as u32, (fs & 0xFFFF_FFFF) as u32)
-    };
-
-    vprintln!("Video: {width}x{height} (output), format: {fmt:?}");
-
-    let duration_us = unsafe { query_duration_us(&reader) };
-
+    // ── first open: send init message ────────────────────────────────────────
+    let (reader, fmt, width, height, duration_us) =
+        match open_reader(url, &source, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
+                          FIRST_VIDEO, ALL_STREAMS) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = init_tx.send(Err(e));
+                return Ok(());
+            }
+        };
     let _ = init_tx.send(Ok((width, height, duration_us, fmt == DecodeFmt::Nv12)));
+
+    // The reader is replaced on each loop iteration (reopen instead of seek at EOF).
+    let mut reader = reader;
+    let mut fmt    = fmt;
 
     // ── decode loop ────────────────────────────────────────────────────────
     let mut wall_start: Option<Instant> = None;
@@ -450,6 +468,11 @@ fn open_and_decode(
     let mut last_speed_index = speed_index.load(Ordering::Relaxed);
     // When Some(us), decode frames without displaying/pacing until pts_us >= us.
     let mut seek_until_us: Option<u64> = None;
+    // Consecutive ReadSample calls that returned no frame (stream tick or null sample).
+    // MF uses these instead of MF_SOURCE_READERF_ENDOFSTREAM for some sources
+    // (SMB network drives, some HTTP servers).  A sustained run signals EOF.
+    let mut null_sample_streak: u32 = 0;
+    const NULL_STREAK_EOF: u32 = 30; // 30 × 1 ms ≈ 30 ms of silence → treat as EOF
 
     'decode: loop {
         // ── stop signal ───────────────────────────────────────────────────
@@ -489,7 +512,7 @@ fn open_and_decode(
         let mut timestamp: i64 = 0;
         let mut sample: Option<IMFSample> = None;
 
-        unsafe {
+        let read_ok = unsafe {
             reader
                 .ReadSample(
                     FIRST_VIDEO,
@@ -499,25 +522,85 @@ fn open_and_decode(
                     Some(&mut timestamp),
                     Some(&mut sample),
                 )
-                .map_err(|e| anyhow!("ReadSample failed: {e}"))?;
-        }
+                .is_ok()
+        };
 
-        // EOF
-        if flags & 0x04 != 0 {
-            let ls = loop_state.load(Ordering::Relaxed);
-            if ls == 2 {
-                let start = loop_start_us.load(Ordering::Relaxed);
-                unsafe { seek_reader_to(&reader, start) };
-                wall_start = None;
-                continue 'decode;
-            }
+        if !read_ok {
+            eprintln!("Video: ReadSample error (flags={flags:#010x})");
             break 'decode;
         }
 
-        let Some(sample) = sample else {
-            thread::sleep(Duration::from_millis(1));
+        if flags & 0x01 != 0 {
+            eprintln!("Video: MF_SOURCE_READERF_ERROR");
+            break 'decode;
+        }
+
+        // EOF — reopen the source reader to loop cleanly.
+        // Seeking after EOF is unreliable in MF (produces infinite stream ticks).
+        // Check EOF *before* stream-tick: MF can return flags=0x06 (tick|EOF)
+        // simultaneously; handling tick first with `continue` would skip this.
+        if flags & 0x04 != 0 {
+            vprintln!("Video: EOF detected, reopening reader for loop.");
+            let seek_to = if loop_state.load(Ordering::Relaxed) == 2 {
+                loop_start_us.load(Ordering::Relaxed)
+            } else {
+                0
+            };
+            match open_reader(url, &source, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
+                             FIRST_VIDEO, ALL_STREAMS) {
+                Ok((new_reader, new_fmt, _, _, _)) => {
+                    reader = new_reader;
+                    fmt    = new_fmt;
+                    if seek_to > 0 {
+                        unsafe { seek_reader_to(&reader, seek_to) };
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Video: reopen failed on loop: {e}");
+                    break 'decode;
+                }
+            }
+            wall_start   = None;
+            seek_until_us = None;
             continue 'decode;
-        };
+        }
+
+        // No frame produced: stream tick (gap marker) or null sample.
+        // MF uses these instead of MF_SOURCE_READERF_ENDOFSTREAM for some sources
+        // (SMB network drives, some HTTP servers).  A sustained run means EOF.
+        if flags & 0x02 != 0 || sample.is_none() {
+            null_sample_streak += 1;
+            if null_sample_streak >= NULL_STREAK_EOF {
+                vprintln!("Video: stream-end detected via tick/null streak, reopening for loop.");
+                let seek_to = if loop_state.load(Ordering::Relaxed) == 2 {
+                    loop_start_us.load(Ordering::Relaxed)
+                } else {
+                    0
+                };
+                match open_reader(url, &source, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
+                                 FIRST_VIDEO, ALL_STREAMS) {
+                    Ok((new_reader, new_fmt, _, _, _)) => {
+                        reader = new_reader;
+                        fmt    = new_fmt;
+                        if seek_to > 0 {
+                            unsafe { seek_reader_to(&reader, seek_to) };
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Video: reopen failed on loop: {e}");
+                        break 'decode;
+                    }
+                }
+                null_sample_streak = 0;
+                wall_start    = None;
+                seek_until_us = None;
+            } else {
+                thread::sleep(Duration::from_millis(1));
+            }
+            continue 'decode;
+        }
+        null_sample_streak = 0;
+        let sample = sample.unwrap();
 
         // ── loop-end check ─────────────────────────────────────────────────
         let pts_us = (timestamp / 10) as u64;
@@ -566,10 +649,17 @@ fn open_and_decode(
         // NV12: copy raw Y+UV planes; GPU shader handles YCbCr → RGB.
         // BGRA/YUY2: CPU converts to BGRA (only reached on HW-decode fallback).
         let frame = match fmt {
-            DecodeFmt::Nv12 => extract_nv12_raw(&sample, height as usize)?,
+            DecodeFmt::Nv12 => {
+                match extract_nv12_raw(&sample, height as usize) {
+                    Ok(f) => f,
+                    Err(e) => return Err(e),
+                }
+            }
             DecodeFmt::Bgra => {
-                let data = extract_bgra_via_2d(&sample, width as usize, height as usize)?;
-                VideoFrame { data, format: VideoFormat::Bgra }
+                match extract_bgra_via_2d(&sample, width as usize, height as usize) {
+                    Ok(data) => VideoFrame { data, format: VideoFormat::Bgra },
+                    Err(e) => return Err(e),
+                }
             }
             DecodeFmt::Yuy2 => {
                 let raw = lock_contiguous(&sample)?;
@@ -803,7 +893,7 @@ fn open_and_decode_audio(
     _paused: &Arc<AtomicBool>,
     _speed_index: &Arc<AtomicU32>,
     audio_seek: &Arc<AtomicU64>,
-    _audio_flush_gen: &Arc<AtomicU64>,
+    audio_flush_gen: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
 ) -> Result<()> {
     use windows::Win32::Media::MediaFoundation::*;
@@ -884,7 +974,7 @@ fn open_and_decode_audio(
         let mut flags: u32 = 0;
         let mut timestamp: i64 = 0;
         let mut sample: Option<IMFSample> = None;
-        unsafe {
+        let read_ok = unsafe {
             reader
                 .ReadSample(
                     FIRST_AUDIO,
@@ -894,11 +984,19 @@ fn open_and_decode_audio(
                     Some(&mut timestamp),
                     Some(&mut sample),
                 )
-                .map_err(|e| anyhow!("Audio ReadSample: {e}"))?;
+                .is_ok()
+        };
+        if !read_ok || flags & 0x01 != 0 {
+            thread::sleep(Duration::from_millis(5));
+            continue;
         }
 
         if flags & 0x04 != 0 {
-            break; // EOF
+            // EOF — flush buffered audio so the cpal callback doesn't play
+            // stale end-of-file samples, then seek back to loop with the video.
+            audio_flush_gen.fetch_add(1, Ordering::Relaxed);
+            unsafe { seek_reader_to(&reader, 0) };
+            continue;
         }
 
         let Some(sample) = sample else { continue };
