@@ -102,6 +102,7 @@ impl PanelRenderer {
         // tight and causes clicks to be silently dropped.  200px is generous enough
         // to survive any realistic controller movement while pressing a button.
         egui_ctx.options_mut(|o| o.input_options.max_click_dist = 200.0);
+        super::fonts::install_system_fonts(&egui_ctx);
         let egui_renderer = egui_wgpu::Renderer::new(device, offscreen_fmt, egui_wgpu::RendererOptions::default());
 
         // ── camera bind group layout ──────────────────────────────────────
