@@ -20,7 +20,7 @@ Features:
   +--+--+--+--+--+--+--+
   |   name of video    |
   +--------------------+
-  |<---*-------------->|  <- que
+  |<---*--------->|time|  <- scrubber and time
   +--------------------+
 
   The icons include
@@ -73,7 +73,7 @@ Features:
 
 [*] fix exit
 [*] left/right on VR stick should fast forward / rewind
-[ ] show logo in desktop window
+[*] show logo in desktop window
 [*] should align to player's initial position (but only around virtual axis for initial orientation)
 [*] should remember settings per video (need to be saved somewhere)
 [*] remember the last folder you were in.
@@ -86,15 +86,23 @@ Features:
 [*] if no arg start on last folder - if error or last folder start on user's home (directories)
 [*] make Y/B exit listing and settings.
 [*] better icons
-[ ] handle unicode fonts
+[*] handle unicode fonts
 [*] make it handle 8x video
-[ ] make audio work when not 1x
+[*] make audio work when not 1x
 [*] turn off pointers when no panel
 [*] make it use previous video's settings if no settings.
 [*] fix listing, que, mouse capture for slider
 [*] no warnings
 [*] debug log
-[ ] second pointer doesn't work
+[*] second pointer doesn't work
+[*] fix more color issues.
+[*] center stuff on top of listings
+[*] add a border
+[*] make stuff same size
+[*] increase icon size
+[*] show an error if can't read video?
+[*] reposition scrubber and time
+[ ] Make app icon larger
 
 [ ] Make it run on Quest - add SMB support
   [ ] need settings to have way to add "roots" where each root is a SMB or webdav or HTTP
