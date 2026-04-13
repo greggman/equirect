@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-pub const VIDEO_EXTS: &[&str] = &["mp4", "m4v", "mkv"];
+pub const VIDEO_EXTS: &[&str] = &["mp4", "m4v", "mkv", "webm"];
 
 // ── Location ──────────────────────────────────────────────────────────────────
 
