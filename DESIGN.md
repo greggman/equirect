@@ -77,10 +77,16 @@ Features:
 [*] should align to player's initial position (but only around virtual axis for initial orientation)
 [*] should remember settings per video (need to be saved somewhere)
 [*] remember the last folder you were in.
-[ ] should support (add to settings)
+[ ] should support (add to browser)
+
+  Note: this feature will require a UI for URL-path, username, password
+  so probably a [+] icon at the top where you can add other roots. This
+  would really be an android/quest feature but could prototype on Windows.
+
   [ ] folders
   [ ] webdav
   [ ] http
+
 [*] have button to select roots on listing panel
 [*] if arg is folder start on listing at folder
 [*] if no arg start on last folder - if error or last folder start on user's home (directories)
@@ -103,6 +109,14 @@ Features:
 [*] show an error if can't read video?
 [*] reposition scrubber and time
 [ ] Make app icon larger
+[*] Portrait videos are too big
+[*] Videos should loop
+[*] Cache network folder reads
+[*] Make next/prev work for network
+[ ] Add Refresh button in the listings folder (because it's cached)
+[*] Icon in windows task bar
+[*] webm
+[*] installer
 
 [ ] Make it run on Quest - add SMB support
   [ ] need settings to have way to add "roots" where each root is a SMB or webdav or HTTP
@@ -110,7 +124,7 @@ Features:
 
 [*] add github actions to build
   [*] for Windows PC
-  [ ] for quest
+  [ ] for Quest
 
 
 

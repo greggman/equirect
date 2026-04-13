@@ -6,6 +6,8 @@ A Rust VR Video Player
 
 [Download here](https://github.com/greggman/equirect/releases/latest)
 
+[Instructions Below](#instructions)
+
 ---
 
 Hopefully this is portable or a step at being portable. It uses WebGPU for the
@@ -54,6 +56,49 @@ I might try to separate out the video to GPU part into a
 crate if that's useful. Maybe it could be the start of a wgpu 
 [`importExternalTexture`](https://gpuweb.github.io/gpuweb/#dom-gpudevice-importexternaltexture) implementation crate.
 
+## Instructions
+
+Run it, it should open your home folder. Navigate to a video and it should play.
+I've only tested on an Oculus Rift-S so I might need some PRs for other devices but.
+The controls are supposed to be
+
+* `B` / `Y` make the control panel appear / disappear
+* `A` / `X` select a button
+
+The control panel has the following icons
+
+```
+[prev][play/pause][next][speed][loop][settings][browse][exit]
+```
+
+* `prev` = go to previous video in same folder as current video
+* `play\pause` = play and pause
+* `next` = go to next video in the same folder as current video
+* `speed` = 1x, 2/3x, 1/2x, 1/3x, 1/4x
+* `loop` = 1 click sets start, 2nd click sets end, 3rd click turns off looping.
+* `settings` = lets you pick projection mode
+* `browse` = lets you pick videos by name
+* `exit` = exit the app
+
+If you pick a video and the projection is wrong, then go to setting
+and pick the correct settings for your video. They'll be remembered.
+When you chose a video that doesn't have settings it will default to
+the settings of the last video you played.
+
+The next time you run the app it will start in the browse UI
+at the last folder you used.
+
+### Command Line
+
+You can run the app from the command line and pass in either
+a path to file, which it will play. Or, you can pass a path to
+a folder, in which case it will start with the browse UI to let you
+pick a video.
+
+You can also pass an network URL like `http://<local-ip-address>/path/somevideo.mp4`
+You can run a server like [servez](https://github.com/greggman/servez) or
+nginx etc and to should let you access your videos.
+
 ## Development
 
 To re-generate the icon texture atlas and the logo
@@ -61,6 +106,10 @@ To re-generate the icon texture atlas and the logo
 ```sh
 npx svg-texture-atlas 128 resources/icons resource/icons
 npx svg-to-png resources/images/equirect.svg resources/equirect.png 640
+npx svg-to-png resources/images/equirect.svg resources/images/icon-32x32.png 32 32
+npx svg-to-png resources/images/equirect.svg resources/images/icon-128x128.png 128 128
 ```
+
+Yea, I should add that to build but I don't expect to have to regenerate them often.
 
 ## License: MIT
