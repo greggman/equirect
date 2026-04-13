@@ -58,6 +58,7 @@ impl BrowserState {
             for entry in rd.flatten() {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') { continue; }
                 if path.is_dir() {
                     dirs.push((name, path));
                 } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
