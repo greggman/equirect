@@ -101,16 +101,19 @@ pub fn draw(ui: &mut egui::Ui, state: &ControlBarState, interaction: Option<(egu
             .color(egui::Color32::WHITE),
     );
 
-    // ── time display ──────────────────────────────────────────────────────
+    // ── seek scrubber + time (same row) ──────────────────────────────────
     let time_label = format!(
         "{} / {}",
         fmt_time(state.current_secs),
         if state.duration_secs > 0.0 { fmt_time(state.duration_secs) } else { "--:--".into() }
     );
-    ui.label(egui::RichText::new(time_label).font(font_id.clone()).color(egui::Color32::WHITE));
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.label(
+            egui::RichText::new(time_label)
+                .font(font_id.clone())
+                .color(egui::Color32::WHITE),
+        );
 
-    // ── seek scrubber (full width) ────────────────────────────────────────
-    {
         let mut frac = if state.duration_secs > 0.0 {
             (state.current_secs / state.duration_secs).clamp(0.0, 1.0) as f32
         } else {
@@ -127,7 +130,7 @@ pub fn draw(ui: &mut egui::Ui, state: &ControlBarState, interaction: Option<(egu
         if resp.changed() {
             actions.seek_frac = Some(frac);
         }
-    }
+    });
 
     actions
 }
