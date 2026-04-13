@@ -1,6 +1,7 @@
 mod app;
 mod audio;
 mod input;
+mod logo;
 mod pointer_renderer;
 mod renderer;
 mod ui;

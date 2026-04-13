@@ -126,7 +126,11 @@ impl ApplicationHandler for App {
 
         let window = Arc::new(
             event_loop
-                .create_window(Window::default_attributes().with_title("equirect"))
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("equirect")
+                        .with_inner_size(winit::dpi::LogicalSize::new(640u32, 428u32)),
+                )
                 .expect("Failed to create window"),
         );
 

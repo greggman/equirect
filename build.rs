@@ -12,6 +12,10 @@ struct IconEntry {
 fn main() {
     println!("cargo:rerun-if-changed=resources/icons.json");
     println!("cargo:rerun-if-changed=resources/icons.png");
+    println!("cargo:rerun-if-changed=resources/equirect.png");
+
+    build_windows_icon();
+
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let out_path = Path::new(&out_dir).join("icons_data.rs");
@@ -54,4 +58,58 @@ fn main() {
     }
 
     std::fs::write(&out_path, out).expect("failed to write icons_data.rs");
+}
+
+/// Generate a multi-size .ico from resources/equirect.png and embed it into
+/// the Windows PE binary via winresource.  On non-Windows targets this is a
+/// no-op.
+fn build_windows_icon() {
+    let out_dir  = std::env::var("OUT_DIR").unwrap();
+    let ico_path = Path::new(&out_dir).join("equirect.ico");
+
+    // Build the .ico even on non-Windows so CI catches regressions.
+    {
+        use image::{imageops::FilterType, DynamicImage, ImageBuffer, Rgba};
+
+        let src_bytes = std::fs::read("resources/equirect.png")
+            .expect("resources/equirect.png not found");
+        let src: DynamicImage = image::load_from_memory(&src_bytes)
+            .expect("failed to decode equirect.png");
+
+        let mut icon_dir = ico::IconDir::new(ico::ResourceType::Icon);
+
+        for size in [16u32, 32, 48, 256] {
+            // Fit the logo into a square canvas with transparent letterboxing.
+            let sw = src.width();
+            let sh = src.height();
+            let scale = (size as f64 / sw as f64).min(size as f64 / sh as f64);
+            let nw = (sw as f64 * scale).round() as u32;
+            let nh = (sh as f64 * scale).round() as u32;
+
+            let resized = src.resize_exact(nw, nh, FilterType::Lanczos3);
+
+            // Paste onto a transparent square.
+            let mut canvas: ImageBuffer<Rgba<u8>, Vec<u8>> =
+                ImageBuffer::new(size, size);
+            let ox = (size - nw) / 2;
+            let oy = (size - nh) / 2;
+            for (x, y, px) in resized.to_rgba8().enumerate_pixels() {
+                canvas.put_pixel(ox + x, oy + y, *px);
+            }
+
+            let img = ico::IconImage::from_rgba_data(size, size, canvas.into_raw());
+            icon_dir.add_entry(ico::IconDirEntry::encode(&img).expect("ico encode failed"));
+        }
+
+        let ico_file = std::fs::File::create(&ico_path).expect("failed to create equirect.ico");
+        icon_dir.write(ico_file).expect("failed to write equirect.ico");
+    }
+
+    // Embed the icon into the Windows binary.
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "windows" {
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon(ico_path.to_str().expect("ico path not UTF-8"));
+        res.compile().expect("winresource compile failed");
+    }
 }
