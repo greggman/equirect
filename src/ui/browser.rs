@@ -100,12 +100,15 @@ pub fn draw(
     ui.style_mut().spacing.scroll.floating  = false;
 
     // ── header: path + volumes button + close ────────────────────────────
-    ui.horizontal(|ui| {
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 40.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
         ui.spacing_mut().button_padding = btn_pad;
 
         ui.label(
             egui::RichText::new(dir_display)
-                .font(egui::FontId::proportional(16.0))
+                .font(font.clone())
                 .color(egui::Color32::LIGHT_GRAY),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

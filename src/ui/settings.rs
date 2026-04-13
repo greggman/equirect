@@ -68,21 +68,25 @@ pub fn draw(
     let stereo_enabled = matches!(state.mode, VideoMode::Sbs3D | VideoMode::View180 | VideoMode::View360);
 
     // ── header ───────────────────────────────────────────────────────────────
-    ui.horizontal(|ui| {
-        ui.spacing_mut().button_padding = btn_pad;
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 40.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().button_padding = btn_pad;
 
-        ui.label(
-            egui::RichText::new("Settings")
-                .font(egui::FontId::proportional(24.0))
-                .color(egui::Color32::WHITE),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().button_padding = egui::vec2(6.0, 6.0);
-            if icons::icon_button(ui, icons::ICON_CLOSE, 24.0, interaction) {
-                actions.close = true;
-            }
-        });
-    });
+            ui.label(
+                egui::RichText::new("Settings")
+                    .font(egui::FontId::proportional(24.0))
+                    .color(egui::Color32::WHITE),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().button_padding = egui::vec2(6.0, 6.0);
+                if icons::icon_button(ui, icons::ICON_CLOSE, 24.0, interaction) {
+                    actions.close = true;
+                }
+            });
+        },
+    );
     ui.separator();
 
     // ── section helper ───────────────────────────────────────────────────────
