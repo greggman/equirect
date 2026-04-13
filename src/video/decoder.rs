@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use crate::vprintln;
 use std::sync::{Arc, Mutex};
@@ -75,7 +74,7 @@ impl Drop for VideoDecoder {
 }
 
 impl VideoDecoder {
-    pub fn open(path: PathBuf) -> Result<Self> {
+    pub fn open(source: String) -> Result<Self> {
         // init message: (width, height, duration_us, is_nv12)
         let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(u32, u32, u64, bool)>>();
         let latest: Arc<Mutex<Option<VideoFrame>>> = Arc::new(Mutex::new(None));
@@ -105,8 +104,8 @@ impl VideoDecoder {
         let lps_end_c    = Arc::clone(&loop_end_us);
         let seek_c       = Arc::clone(&seek_request);
 
-        // Clone path before moving it into the video thread.
-        let audio_path      = path.clone();
+        // Clone source string before moving it into the video thread.
+        let audio_source    = source.clone();
         let audio_paused    = Arc::clone(&paused);
         let audio_speed     = Arc::clone(&speed_index);
         let audio_seek_c    = Arc::clone(&audio_seek);
@@ -118,7 +117,7 @@ impl VideoDecoder {
             .name("video-decode".into())
             .spawn(move || {
                 decode_thread(
-                    path, init_tx, latest_clone,
+                    source, init_tx, latest_clone,
                     pts_c, pau_c, spd_c,
                     lps_c, lps_start_c, lps_end_c, seek_c, stop_video,
                 )
@@ -128,7 +127,7 @@ impl VideoDecoder {
             .name("audio-decode".into())
             .spawn(move || {
                 audio_decode_thread(
-                    audio_path, audio_fmt_tx, audio_tx,
+                    audio_source, audio_fmt_tx, audio_tx,
                     audio_paused, audio_speed, audio_seek_c, audio_flush_c, stop_audio,
                 )
             })?;
@@ -184,7 +183,7 @@ impl VideoDecoder {
 
 #[allow(clippy::too_many_arguments)]
 fn decode_thread(
-    path: PathBuf,
+    source: String,
     init_tx: std::sync::mpsc::Sender<Result<(u32, u32, u64, bool)>>,
     latest: Arc<Mutex<Option<VideoFrame>>>,
     current_pts_us:  Arc<AtomicU64>,
@@ -203,16 +202,15 @@ fn decode_thread(
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
         const MF_VER: u32 = 0x0002_0070;
-        const MFSTARTUP_NOSOCKET: u32 = 0x1;
-
-        if let Err(e) = MFStartup(MF_VER, MFSTARTUP_NOSOCKET) {
+        // 0 = MFSTARTUP_FULL — initialises networking so http(s):// URLs work.
+        if let Err(e) = MFStartup(MF_VER, 0) {
             let _ = init_tx.send(Err(anyhow!("MFStartup failed: {e}")));
             CoUninitialize();
             return;
         }
 
         match open_and_decode(
-            path, init_tx, &latest,
+            source, init_tx, &latest,
             &current_pts_us, &paused, &speed_index,
             &loop_state, &loop_start_us, &loop_end_us, &seek_request, &stop,
         ) {
@@ -348,7 +346,7 @@ unsafe fn query_duration_us(
 
 #[allow(clippy::too_many_arguments)]
 fn open_and_decode(
-    path: PathBuf,
+    source: String,
     init_tx: std::sync::mpsc::Sender<Result<(u32, u32, u64, bool)>>,
     latest: &Arc<Mutex<Option<VideoFrame>>>,
     current_pts_us:  &Arc<AtomicU64>,
@@ -360,14 +358,18 @@ fn open_and_decode(
     seek_request:    &Arc<Mutex<Option<u64>>>,
     stop:            &Arc<AtomicBool>,
 ) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Media::MediaFoundation::*;
     use windows::core::PCWSTR;
 
     const FIRST_VIDEO: u32 = 0xFFFF_FFFC;
     const ALL_STREAMS: u32 = 0xFFFF_FFFE;
 
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0u16]).collect();
+    let wide: Vec<u16> = if source.starts_with("http://") || source.starts_with("https://") {
+        source.encode_utf16().chain([0u16]).collect()
+    } else {
+        use std::os::windows::ffi::OsStrExt;
+        std::path::Path::new(&source).as_os_str().encode_wide().chain([0u16]).collect()
+    };
     let url = PCWSTR(wide.as_ptr());
 
     // MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS: use hardware MFTs (encoders/decoders).
@@ -395,7 +397,7 @@ fn open_and_decode(
         }
 
         MFCreateSourceReaderFromURL(url, Some(&attrs))
-            .map_err(|e| anyhow!("Open '{path:?}' failed: {e}"))?
+            .map_err(|e| anyhow!("Open '{source:?}' failed: {e}"))?
     };
 
     unsafe {
@@ -761,7 +763,7 @@ fn lock_contiguous(
 // ── audio decode thread ───────────────────────────────────────────────────
 
 fn audio_decode_thread(
-    path: PathBuf,
+    source: String,
     format_tx: std::sync::mpsc::Sender<Option<(u32, u16)>>,
     producer: std::sync::mpsc::SyncSender<f32>,
     paused: Arc<AtomicBool>,
@@ -776,14 +778,14 @@ fn audio_decode_thread(
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         const MF_VER: u32 = 0x0002_0070;
-        const MFSTARTUP_NOSOCKET: u32 = 0x1;
-        if MFStartup(MF_VER, MFSTARTUP_NOSOCKET).is_err() {
+        // 0 = MFSTARTUP_FULL — needed for http(s):// URLs.
+        if MFStartup(MF_VER, 0).is_err() {
             let _ = format_tx.send(None);
             CoUninitialize();
             return;
         }
         match open_and_decode_audio(
-            path, &format_tx, &producer,
+            source, &format_tx, &producer,
             &paused, &speed_index, &audio_seek, &audio_flush_gen, &stop,
         ) {
             Ok(()) => {}
@@ -795,7 +797,7 @@ fn audio_decode_thread(
 }
 
 fn open_and_decode_audio(
-    path: PathBuf,
+    source: String,
     format_tx: &std::sync::mpsc::Sender<Option<(u32, u16)>>,
     producer: &std::sync::mpsc::SyncSender<f32>,
     _paused: &Arc<AtomicBool>,
@@ -804,7 +806,6 @@ fn open_and_decode_audio(
     _audio_flush_gen: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
 ) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Media::MediaFoundation::*;
     use windows::core::PCWSTR;
 
@@ -812,7 +813,12 @@ fn open_and_decode_audio(
     const ALL_STREAMS: u32 = 0xFFFF_FFFE;
     const NO_SEEK: u64 = u64::MAX;
 
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0u16]).collect();
+    let wide: Vec<u16> = if source.starts_with("http://") || source.starts_with("https://") {
+        source.encode_utf16().chain([0u16]).collect()
+    } else {
+        use std::os::windows::ffi::OsStrExt;
+        std::path::Path::new(&source).as_os_str().encode_wide().chain([0u16]).collect()
+    };
     let url = PCWSTR(wide.as_ptr());
 
     let reader: IMFSourceReader = unsafe {

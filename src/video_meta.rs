@@ -13,14 +13,18 @@ pub struct VideoMeta {
     pub settings: VideoSettings,
 }
 
-fn meta_path(video_path: &Path) -> Option<std::path::PathBuf> {
+fn config_meta_path(key: &str) -> Option<std::path::PathBuf> {
     let dirs = ProjectDirs::from("", "", "equirect")?;
-    let canonical = video_path.canonicalize().ok()
-        .unwrap_or_else(|| video_path.to_path_buf());
-    let hash = format!("{:x}", Sha256::digest(canonical.to_string_lossy().as_bytes()));
+    let hash = format!("{:x}", Sha256::digest(key.as_bytes()));
     let mut p = dirs.config_dir().to_path_buf();
     p.push(format!("video-{}.json", hash));
     Some(p)
+}
+
+fn meta_path(video_path: &Path) -> Option<std::path::PathBuf> {
+    let canonical = video_path.canonicalize().ok()
+        .unwrap_or_else(|| video_path.to_path_buf());
+    config_meta_path(&canonical.to_string_lossy())
 }
 
 /// Load saved metadata for `video_path`.  Returns `None` if no metadata exists yet.
@@ -33,11 +37,28 @@ pub fn load(video_path: &Path) -> Option<VideoMeta> {
 /// Save metadata for `video_path`.  Silently ignores I/O errors.
 pub fn save(video_path: &Path, meta: &VideoMeta) {
     let Some(path) = meta_path(video_path) else { return };
+    write_meta(&path, meta);
+}
+
+/// Load saved metadata for a URL.  Returns `None` if no metadata exists yet.
+pub fn load_url(url: &str) -> Option<VideoMeta> {
+    let path = config_meta_path(url)?;
+    let data = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+/// Save metadata for a URL.  Silently ignores I/O errors.
+pub fn save_url(url: &str, meta: &VideoMeta) {
+    let Some(path) = config_meta_path(url) else { return };
+    write_meta(&path, meta);
+}
+
+fn write_meta(path: &std::path::Path, meta: &VideoMeta) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string_pretty(meta) {
-        let _ = std::fs::write(&path, json);
+        let _ = std::fs::write(path, json);
     }
 }
 

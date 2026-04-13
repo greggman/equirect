@@ -11,37 +11,87 @@ use winit::{
 
 use crate::pointer_renderer::PointerRenderer;
 use crate::renderer::Renderer;
-use crate::ui::browser::{BrowserState, VIDEO_EXTS};
+use crate::ui::browser::{BrowserState, Location, VIDEO_EXTS};
 use crate::ui::settings::VideoSettings;
 use crate::video_layer::{VideoSwapchain, use_xr_layer};
 use crate::video_meta;
 
-/// Returns the path of the video that is `delta` steps away from `current`
-/// in a sorted list of video files in the same directory, wrapping around.
-/// Returns `None` if the directory can't be read or there are no other videos.
-fn adjacent_video(current: &std::path::Path, delta: i32) -> Option<PathBuf> {
-    let dir = current.parent()?;
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+fn is_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
+/// Short display name for a video source string.
+fn source_display_name(s: &str) -> String {
+    if is_url(s) {
+        let raw = s.trim_end_matches('/').rsplit('/').next().unwrap_or(s);
+        crate::net::url_decode(raw)
+    } else {
+        std::path::Path::new(s)
+            .file_stem()
+            .and_then(|x| x.to_str())
+            .unwrap_or("")
+            .to_string()
+    }
+}
+
+fn source_to_location(s: &str) -> Location {
+    if is_url(s) {
+        Location::Remote(s.to_string())
+    } else {
+        Location::Local(PathBuf::from(s))
+    }
+}
+
+fn location_to_source(loc: Location) -> String {
+    match loc {
+        Location::Local(p)  => p.to_string_lossy().into_owned(),
+        Location::Remote(u) => u,
+    }
+}
+
+fn load_meta(source: &str) -> Option<video_meta::VideoMeta> {
+    if is_url(source) {
+        video_meta::load_url(source)
+    } else {
+        video_meta::load(std::path::Path::new(source))
+    }
+}
+
+fn save_meta(source: &str, meta: &video_meta::VideoMeta) {
+    if is_url(source) {
+        video_meta::save_url(source, meta);
+    } else {
+        video_meta::save(std::path::Path::new(source), meta);
+    }
+}
+
+/// Returns the path of the video that is `delta` steps away from the current
+/// one in a sorted directory listing.  Only meaningful for local files.
+fn adjacent_video(current: &str, delta: i32) -> Option<String> {
+    let p = std::path::Path::new(current);
+    let dir = p.parent()?;
     let mut videos: Vec<PathBuf> = std::fs::read_dir(dir).ok()?
         .flatten()
         .filter_map(|e| {
-            let p = e.path();
-            let ext = p.extension().and_then(|x| x.to_str())?;
+            let vp = e.path();
+            let ext = vp.extension().and_then(|x| x.to_str())?;
             if VIDEO_EXTS.iter().any(|&v| v.eq_ignore_ascii_case(ext)) {
-                Some(p)
+                Some(vp)
             } else {
                 None
             }
         })
         .collect();
     if videos.is_empty() { return None; }
-    videos.sort_by(|a, b| {
-        a.file_name().cmp(&b.file_name())
-    });
-    let n = videos.len() as i32;
-    let pos = videos.iter().position(|p| p == current)? as i32;
-    let next_pos = ((pos + delta).rem_euclid(n)) as usize;
-    Some(videos[next_pos].clone())
+    videos.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    let n   = videos.len() as i32;
+    let pos = videos.iter().position(|vp| vp == p)? as i32;
+    Some(videos[((pos + delta).rem_euclid(n)) as usize].to_string_lossy().into_owned())
 }
+
+// ── App ───────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq)]
 enum PanelMode {
@@ -69,7 +119,8 @@ pub struct App {
     panel_renderer: Option<PanelRenderer>,
     pointer_renderer: Option<PointerRenderer>,
     control_bar_state: ControlBarState,
-    video_path: Option<PathBuf>,
+    /// Current video source: a local file path or an http(s):// URL.
+    video_source: Option<String>,
     // File browser
     browser_state: Option<BrowserState>,
     browser_panel: Option<PanelRenderer>,
@@ -80,17 +131,16 @@ pub struct App {
     settings_panel: Option<PanelRenderer>,
     // Panel visibility
     panel_mode: PanelMode,
-    /// While `Some(t)`, pin the scrubber at `t` rather than following the
-    /// decoder's current PTS.  The pin is released once the decoder reaches `t`
-    /// (within one frame), or after `seek_timeout` as a safety net.
     seek_target_secs: Option<f64>,
     seek_timeout: Option<std::time::Instant>,
 }
 
 impl App {
-    pub fn new(video_path: Option<PathBuf>, initial_browser_dir: Option<PathBuf>) -> Self {
-        // If we have an initial browser dir but no video, start with the browser open.
-        let panel_mode = if video_path.is_none() && initial_browser_dir.is_some() {
+    pub fn new(
+        video_source: Option<String>,
+        initial_browser_dir: Option<PathBuf>,
+    ) -> Self {
+        let panel_mode = if video_source.is_none() && initial_browser_dir.is_some() {
             PanelMode::Browser
         } else {
             PanelMode::ControlBar
@@ -105,7 +155,7 @@ impl App {
             panel_renderer: None,
             pointer_renderer: None,
             control_bar_state: ControlBarState::default(),
-            video_path,
+            video_source,
             browser_state: None,
             browser_panel: None,
             initial_browser_dir,
@@ -149,39 +199,32 @@ impl ApplicationHandler for App {
             .map(|v| v.swapchain_format)
             .unwrap_or_else(|| renderer.surface_format());
 
-        if let Some(ref path) = self.video_path {
-            // Restore per-video settings before opening.
-            if let Some(meta) = video_meta::load(path) {
+        if let Some(ref source) = self.video_source {
+            if let Some(meta) = load_meta(source) {
                 self.video_settings = meta.settings;
             }
-            match VideoDecoder::open(path.clone()) {
+            match VideoDecoder::open(source.clone()) {
                 Err(e) => {
                     self.control_bar_state.error = Some(format!("Can't play video: {e}"));
                     self.panel_mode = PanelMode::ControlBar;
                 }
                 Ok(decoder) => {
                     self.control_bar_state.error = None;
-                    let tex = VideoTexture::new(&renderer.device, decoder.width, decoder.height, decoder.is_nv12);
-                    // VideoRenderer is only used for the fisheye shader fallback.
-                    let vr_rend = VideoRenderer::new(
-                        &renderer.device,
-                        target_fmt,
-                        decoder.width,
-                        decoder.height,
+                    let tex = VideoTexture::new(
+                        &renderer.device, decoder.width, decoder.height, decoder.is_nv12,
                     );
-                    // VideoSwapchain for the XR composition-layer path.
+                    let vr_rend = VideoRenderer::new(
+                        &renderer.device, target_fmt,
+                        decoder.width, decoder.height,
+                    );
                     let sc = vr.as_ref().and_then(|vr| {
                         vr.create_video_swapchain(&renderer.device, decoder.width, decoder.height)
                     });
-
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        self.control_bar_state.video_name = stem.to_owned();
-                    }
+                    self.control_bar_state.video_name = source_display_name(source);
                     if decoder.duration_us > 0 {
                         self.control_bar_state.duration_secs =
                             decoder.duration_us as f64 / 1_000_000.0;
                     }
-
                     self.video_decoder   = Some(decoder);
                     self.video_texture   = Some(tex);
                     self.video_renderer  = Some(vr_rend);
@@ -190,32 +233,23 @@ impl ApplicationHandler for App {
             }
         }
 
-        // Panel: original 800×160 px canvas, displayed at 2× the original physical size
-        // (2.0 m wide × 0.4 m tall) so everything inside appears 2× larger.
-        // Centered at Y=0.0, just below the video whose bottom sits near Y=0.
         self.panel_renderer = Some(PanelRenderer::new(
-            &renderer.device,
-            target_fmt,
-            720,
-            160,
+            &renderer.device, target_fmt,
+            720, 160,
             glam::Vec3::new(0.0, 0.0, -2.0),
-            1.8,
-            0.4,
+            1.8, 0.4,
         ));
 
         self.pointer_renderer = Some(PointerRenderer::new(&renderer.device, target_fmt));
 
-        // If an initial browser directory was provided, create the browser panel now.
         if let Some(dir) = self.initial_browser_dir.take() {
-            self.browser_state = Some(BrowserState::new(dir, self.video_path.clone()));
+            let current_loc = self.video_source.as_deref().map(source_to_location);
+            self.browser_state = Some(BrowserState::new(Location::Local(dir), current_loc));
             self.browser_panel = Some(PanelRenderer::new(
-                &renderer.device,
-                target_fmt,
-                800,
-                600,
+                &renderer.device, target_fmt,
+                800, 600,
                 glam::Vec3::new(0.0, 1.2, -2.0),
-                1.6,
-                1.2,
+                1.6, 1.2,
             ));
         }
 
@@ -226,13 +260,9 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-
             WindowEvent::Resized(size) => {
-                if let Some(r) = &mut self.renderer {
-                    r.resize(size);
-                }
+                if let Some(r) = &mut self.renderer { r.resize(size); }
             }
-
             WindowEvent::RedrawRequested => {
                 let Some(r) = &mut self.renderer else { return };
                 if !r.render() {
@@ -241,7 +271,6 @@ impl ApplicationHandler for App {
                 }
                 r.window().request_redraw();
             }
-
             _ => {}
         }
     }
@@ -249,7 +278,6 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let Some(renderer) = &self.renderer else { return };
 
-        // Sync duration once the decoder has it (it arrives async from the media source).
         if self.control_bar_state.duration_secs == 0.0 {
             if let Some(dec) = &self.video_decoder {
                 if dec.duration_us > 0 {
@@ -259,11 +287,9 @@ impl ApplicationHandler for App {
             }
         }
 
-        // Upload the latest decoded frame if one is available.
         if let (Some(decoder), Some(texture)) = (&self.video_decoder, &self.video_texture) {
             if let Some(frame) = decoder.take_frame() {
                 texture.upload(&renderer.queue, &frame);
-                // Rebind texture in both the shader renderer and the swapchain blit.
                 if let Some(vr_rend) = &mut self.video_renderer {
                     vr_rend.set_texture(&renderer.device, texture);
                 }
@@ -271,22 +297,15 @@ impl ApplicationHandler for App {
                     sc.set_texture(&renderer.device, &renderer.queue, texture);
                 }
             }
-            // Pin the scrubber at the seek target until the decoder actually
-            // reaches that position (within 0.1 s) or a 5-second safety
-            // timeout expires.  This prevents the scrubber from snapping back
-            // while the decoder is decoding forward from the keyframe.
-            let pts_us = decoder.current_pts_us.load(Ordering::Relaxed);
-            let pts_secs = pts_us as f64 / 1_000_000.0;
+            let pts_secs = decoder.current_pts_us.load(Ordering::Relaxed) as f64 / 1_000_000.0;
             if let Some(target) = self.seek_target_secs {
                 let timed_out = self.seek_timeout
                     .map_or(false, |t| std::time::Instant::now() >= t);
-                let reached = pts_secs >= target - 0.1;
-                if reached || timed_out {
+                if pts_secs >= target - 0.1 || timed_out {
                     self.control_bar_state.current_secs = pts_secs;
                     self.seek_target_secs = None;
                     self.seek_timeout = None;
                 }
-                // else: keep current_secs pinned at target (scrubber stays put)
             } else {
                 self.control_bar_state.current_secs = pts_secs;
             }
@@ -298,59 +317,37 @@ impl ApplicationHandler for App {
                     .device
                     .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
                     .ok();
-                // Drop VideoSwapchain BEFORE VrContext so xrDestroySwapchain
-                // is called while the session is still alive.
                 self.video_swapchain = None;
                 self.vr = None;
                 return;
             }
 
-            // Route video based on current projection setting.
             let use_layer = use_xr_layer(&self.video_settings, vr.has_equirect2);
-            // Clone settings so we can hold &mut self.video_settings for the settings panel
-            // at the same time as we pass &VideoSettings to the video layer.
             let video_settings_snap = self.video_settings.clone();
-            let video_layer_arg: Option<(&mut crate::video_layer::VideoSwapchain, &VideoSettings)> =
-                if use_layer {
-                    self.video_swapchain.as_mut().map(|sc| (sc, &video_settings_snap))
-                } else {
-                    None
-                };
+            let video_layer_arg =
+                if use_layer { self.video_swapchain.as_mut().map(|sc| (sc, &video_settings_snap)) }
+                else { None };
             let video_shader_arg = if !use_layer {
                 self.video_renderer.as_ref()
                     .zip(self.video_texture.as_ref())
                     .map(|(r, t)| (r, t, &video_settings_snap))
-            } else {
-                None
-            };
+            } else { None };
 
-            // Only pass the panel that should currently be visible.
-            let panel_arg: Option<(&mut PanelRenderer, &ControlBarState)> =
+            let panel_arg =
                 if self.panel_mode == PanelMode::ControlBar {
                     self.panel_renderer.as_mut().map(|p| (p, &self.control_bar_state))
-                } else {
-                    None
-                };
-            let browser_arg: Option<(&mut PanelRenderer, &mut BrowserState)> =
+                } else { None };
+            let browser_arg =
                 if self.panel_mode == PanelMode::Browser {
                     self.browser_panel.as_mut().zip(self.browser_state.as_mut())
-                } else {
-                    None
-                };
-
-            let settings_arg: Option<(&mut PanelRenderer, &mut VideoSettings)> =
+                } else { None };
+            let settings_arg =
                 if self.panel_mode == PanelMode::Settings {
                     self.settings_panel.as_mut().map(|p| (p, &mut self.video_settings))
-                } else {
-                    None
-                };
-
-            // Pointers are shown whenever a panel is visible; hidden otherwise.
-            let pointer_arg = if self.panel_mode != PanelMode::Hidden {
-                self.pointer_renderer.as_ref()
-            } else {
-                None
-            };
+                } else { None };
+            let pointer_arg =
+                if self.panel_mode != PanelMode::Hidden { self.pointer_renderer.as_ref() }
+                else { None };
 
             let (actions, browser_actions, settings_actions) = vr.render_frame(
                 renderer,
@@ -362,7 +359,7 @@ impl ApplicationHandler for App {
                 pointer_arg,
             );
 
-            // ── handle browser actions ─────────────────────────────────────
+            // ── browser actions ───────────────────────────────────────────────
 
             if browser_actions.close {
                 self.browser_state = None;
@@ -370,64 +367,62 @@ impl ApplicationHandler for App {
                 self.panel_mode    = PanelMode::ControlBar;
             }
 
-            if let Some(dir) = browser_actions.navigate {
-                let vol_root = crate::volumes::volume_root_of(&dir);
-                video_meta::save_last_dir(&dir);
-                video_meta::save_volume_last_dir(&vol_root, &dir);
+            if let Some(loc) = browser_actions.navigate {
+                if let Some(dir) = loc.as_local() {
+                    let vol_root = crate::volumes::volume_root_of(dir);
+                    video_meta::save_last_dir(dir);
+                    video_meta::save_volume_last_dir(&vol_root, dir);
+                }
                 if let Some(bs) = &mut self.browser_state {
-                    bs.navigate_to(dir);
+                    bs.navigate_to(loc);
                 }
             }
 
             if let Some(vol_root) = browser_actions.select_volume {
-                // Save current browser position as that volume's last dir
-                // before switching away.
                 if let Some(bs) = &self.browser_state {
-                    let cur_root = crate::volumes::volume_root_of(&bs.dir);
-                    video_meta::save_volume_last_dir(&cur_root, &bs.dir);
+                    if let Some(cur_dir) = bs.location.as_local() {
+                        let cur_root = crate::volumes::volume_root_of(cur_dir);
+                        video_meta::save_volume_last_dir(&cur_root, cur_dir);
+                    }
                 }
-                // Resolve the best directory to land on in the selected volume.
                 let target = video_meta::resolve_dir_for_volume(&vol_root);
                 video_meta::save_last_dir(&target);
                 if let Some(bs) = &mut self.browser_state {
-                    bs.navigate_to(target);
+                    bs.navigate_to(Location::Local(target));
                 }
             }
 
-            if let Some(new_path) = browser_actions.play {
-                // Save the folder this video lives in as the last browsed dir.
-                if let Some(parent) = new_path.parent() {
-                    video_meta::save_last_dir(parent);
+            if let Some(play_loc) = browser_actions.play {
+                if let Location::Local(ref p) = play_loc {
+                    if let Some(parent) = p.parent() {
+                        video_meta::save_last_dir(parent);
+                    }
                 }
                 self.browser_state = None;
                 self.browser_panel = None;
                 self.panel_mode    = PanelMode::Hidden;
 
+                let new_source = location_to_source(play_loc);
                 let target_fmt = vr.swapchain_format;
 
-                // Restore saved settings for the new video; if none exist, inherit
-                // the current settings and immediately save them for the new file.
-                self.video_settings = video_meta::load(&new_path)
+                self.video_settings = load_meta(&new_source)
                     .map(|m| m.settings)
                     .unwrap_or_else(|| {
                         let inherited = self.video_settings.clone();
-                        video_meta::save(&new_path, &video_meta::VideoMeta {
-                            settings: inherited.clone(),
-                        });
+                        save_meta(&new_source, &video_meta::VideoMeta { settings: inherited.clone() });
                         inherited
                     });
 
-                // Drop old video components before opening the new file.
                 self.video_swapchain = None;
                 self.video_decoder   = None;
                 self.video_texture   = None;
                 self.video_renderer  = None;
 
-                match VideoDecoder::open(new_path.clone()) {
+                match VideoDecoder::open(new_source.clone()) {
                     Err(e) => {
                         self.control_bar_state.error = Some(format!("Can't play video: {e}"));
-                        self.panel_mode = PanelMode::ControlBar;
-                        self.video_path = Some(new_path);
+                        self.panel_mode  = PanelMode::ControlBar;
+                        self.video_source = Some(new_source);
                     }
                     Ok(decoder) => {
                         self.control_bar_state.error = None;
@@ -441,18 +436,13 @@ impl ApplicationHandler for App {
                         let sc = vr.create_video_swapchain(
                             &renderer.device, decoder.width, decoder.height,
                         );
-                        if let Some(stem) = new_path.file_stem().and_then(|s| s.to_str()) {
-                            self.control_bar_state.video_name = stem.to_owned();
-                        }
-                        if decoder.duration_us > 0 {
-                            self.control_bar_state.duration_secs =
-                                decoder.duration_us as f64 / 1_000_000.0;
-                        } else {
-                            self.control_bar_state.duration_secs = 0.0;
-                        }
+                        self.control_bar_state.video_name = source_display_name(&new_source);
+                        self.control_bar_state.duration_secs =
+                            if decoder.duration_us > 0 { decoder.duration_us as f64 / 1_000_000.0 }
+                            else { 0.0 };
                         self.control_bar_state.current_secs = 0.0;
-                        self.control_bar_state.is_playing    = true;
-                        self.video_path      = Some(new_path);
+                        self.control_bar_state.is_playing   = true;
+                        self.video_source    = Some(new_source);
                         self.video_decoder   = Some(decoder);
                         self.video_texture   = Some(tex);
                         self.video_renderer  = Some(vr_rend);
@@ -461,21 +451,20 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // ── handle settings actions ────────────────────────────────────
+            // ── settings actions ──────────────────────────────────────────────
 
             if settings_actions.changed {
-                if let Some(ref path) = self.video_path {
-                    video_meta::save(path, &video_meta::VideoMeta {
+                if let Some(ref source) = self.video_source {
+                    save_meta(source, &video_meta::VideoMeta {
                         settings: self.video_settings.clone(),
                     });
                 }
             }
-
             if settings_actions.close {
                 self.panel_mode = PanelMode::ControlBar;
             }
 
-            // ── handle control bar actions ─────────────────────────────────
+            // ── control bar actions ───────────────────────────────────────────
 
             if actions.play_pause {
                 self.control_bar_state.is_playing = !self.control_bar_state.is_playing;
@@ -489,22 +478,17 @@ impl ApplicationHandler for App {
                     (self.control_bar_state.speed_index + 1) % SPEEDS.len();
                 if let Some(dec) = &self.video_decoder {
                     dec.speed_index.store(
-                        self.control_bar_state.speed_index as u32,
-                        Ordering::Relaxed,
+                        self.control_bar_state.speed_index as u32, Ordering::Relaxed,
                     );
                 }
             }
 
             if actions.cycle_loop {
-                let current_us = self
-                    .video_decoder
-                    .as_ref()
+                let current_us = self.video_decoder.as_ref()
                     .map(|d| d.current_pts_us.load(Ordering::Relaxed))
                     .unwrap_or(0);
-
                 match self.control_bar_state.loop_state {
                     0 => {
-                        // First click — set loop start.
                         if let Some(dec) = &self.video_decoder {
                             dec.loop_start_us.store(current_us, Ordering::Relaxed);
                             dec.loop_state.store(1, Ordering::Relaxed);
@@ -512,7 +496,6 @@ impl ApplicationHandler for App {
                         self.control_bar_state.loop_state = 1;
                     }
                     1 => {
-                        // Second click — set loop end and activate.
                         if let Some(dec) = &self.video_decoder {
                             dec.loop_end_us.store(current_us, Ordering::Relaxed);
                             dec.loop_state.store(2, Ordering::Relaxed);
@@ -520,7 +503,6 @@ impl ApplicationHandler for App {
                         self.control_bar_state.loop_state = 2;
                     }
                     _ => {
-                        // Third click — clear loop.
                         if let Some(dec) = &self.video_decoder {
                             dec.loop_state.store(0, Ordering::Relaxed);
                         }
@@ -536,14 +518,11 @@ impl ApplicationHandler for App {
                         *dec.seek_request.lock().unwrap() = Some(target_us);
                         dec.audio_seek.store(target_us, Ordering::Relaxed);
                         dec.audio_flush_gen.fetch_add(1, Ordering::Relaxed);
-                        // Show the target position immediately; hold the scrubber
-                        // there until the decoder catches up.
                         let target_secs = target_us as f64 / 1_000_000.0;
                         self.control_bar_state.current_secs = target_secs;
                         self.seek_target_secs = Some(target_secs);
                         self.seek_timeout = Some(
-                            std::time::Instant::now()
-                                + std::time::Duration::from_millis(500),
+                            std::time::Instant::now() + std::time::Duration::from_millis(500),
                         );
                     }
                 }
@@ -553,78 +532,70 @@ impl ApplicationHandler for App {
                 if let Some(dec) = &self.video_decoder {
                     if dec.duration_us > 0 {
                         let duration_secs = dec.duration_us as f64 / 1_000_000.0;
-                        let current_secs  = self.control_bar_state.current_secs;
-                        let target_secs   = (current_secs + delta_secs).rem_euclid(duration_secs);
-                        let target_us     = (target_secs * 1_000_000.0) as u64;
+                        let target_secs =
+                            (self.control_bar_state.current_secs + delta_secs)
+                            .rem_euclid(duration_secs);
+                        let target_us = (target_secs * 1_000_000.0) as u64;
                         *dec.seek_request.lock().unwrap() = Some(target_us);
                         dec.audio_seek.store(target_us, Ordering::Relaxed);
                         dec.audio_flush_gen.fetch_add(1, Ordering::Relaxed);
-                        // Show the target position immediately; hold the scrubber
-                        // there until the decoder catches up.
                         self.control_bar_state.current_secs = target_secs;
                         self.seek_target_secs = Some(target_secs);
                         self.seek_timeout = Some(
-                            std::time::Instant::now()
-                                + std::time::Duration::from_millis(500),
+                            std::time::Instant::now() + std::time::Duration::from_millis(500),
                         );
                     }
                 }
             }
 
-            // ── prev / next video ──────────────────────────────────────────
+            // ── prev / next video (local files only) ──────────────────────────
             let nav_delta: Option<i32> = if actions.prev { Some(-1) }
                 else if actions.next { Some(1) }
                 else { None };
 
             if let Some(delta) = nav_delta {
-                if let Some(new_path) = self.video_path.as_deref()
-                    .and_then(|p| adjacent_video(p, delta))
-                {
-                    let target_fmt = vr.swapchain_format;
+                let next = self.video_source.as_deref()
+                    .filter(|s| !is_url(s))
+                    .and_then(|s| adjacent_video(s, delta));
 
-                    self.video_settings = video_meta::load(&new_path)
+                if let Some(new_source) = next {
+                    let target_fmt = vr.swapchain_format;
+                    self.video_settings = load_meta(&new_source)
                         .map(|m| m.settings)
                         .unwrap_or_else(|| {
                             let inherited = self.video_settings.clone();
-                            video_meta::save(&new_path, &video_meta::VideoMeta {
-                                settings: inherited.clone(),
-                            });
+                            save_meta(&new_source, &video_meta::VideoMeta { settings: inherited.clone() });
                             inherited
                         });
-
                     self.video_swapchain = None;
                     self.video_decoder   = None;
                     self.video_texture   = None;
                     self.video_renderer  = None;
-
-                    match crate::video::decoder::VideoDecoder::open(new_path.clone()) {
+                    match VideoDecoder::open(new_source.clone()) {
                         Err(e) => {
                             self.control_bar_state.error = Some(format!("Can't play video: {e}"));
-                            self.panel_mode = PanelMode::ControlBar;
-                            self.video_path = Some(new_path);
+                            self.panel_mode  = PanelMode::ControlBar;
+                            self.video_source = Some(new_source);
                         }
                         Ok(decoder) => {
                             self.control_bar_state.error = None;
-                            let tex = crate::video::texture::VideoTexture::new(
+                            let tex = VideoTexture::new(
                                 &renderer.device, decoder.width, decoder.height, decoder.is_nv12,
                             );
-                            let vr_rend = crate::video_renderer::VideoRenderer::new(
+                            let vr_rend = VideoRenderer::new(
                                 &renderer.device, target_fmt,
                                 decoder.width, decoder.height,
                             );
                             let sc = vr.create_video_swapchain(
                                 &renderer.device, decoder.width, decoder.height,
                             );
-                            if let Some(stem) = new_path.file_stem().and_then(|s| s.to_str()) {
-                                self.control_bar_state.video_name = stem.to_owned();
-                            }
+                            self.control_bar_state.video_name = source_display_name(&new_source);
                             self.control_bar_state.duration_secs =
-                                if decoder.duration_us > 0 {
-                                    decoder.duration_us as f64 / 1_000_000.0
-                                } else { 0.0 };
+                                if decoder.duration_us > 0 { decoder.duration_us as f64 / 1_000_000.0 }
+                                else { 0.0 };
                             self.control_bar_state.current_secs = 0.0;
                             self.control_bar_state.is_playing   = true;
-                            self.video_path      = Some(new_path);
+                            self.video_source    = Some(new_source);
                             self.video_decoder   = Some(decoder);
                             self.video_texture   = Some(tex);
                             self.video_renderer  = Some(vr_rend);
@@ -635,57 +606,44 @@ impl ApplicationHandler for App {
             }
 
             if actions.show_settings && self.panel_mode != PanelMode::Settings {
-                // Lazily create the settings panel the first time.
                 if self.settings_panel.is_none() {
-                    let target_fmt = vr.swapchain_format;
-                    // 800×500 px canvas displayed at 1.6 m × 1.0 m, centred at eye level.
                     self.settings_panel = Some(PanelRenderer::new(
-                        &renderer.device,
-                        target_fmt,
-                        800,
-                        500,
+                        &renderer.device, vr.swapchain_format,
+                        800, 500,
                         glam::Vec3::new(0.0, 1.2, -2.0),
-                        1.6,
-                        1.0,
+                        1.6, 1.0,
                     ));
                 }
                 self.panel_mode = PanelMode::Settings;
             }
 
             if actions.show_browser && self.panel_mode != PanelMode::Browser {
-                // Lazily create browser state and panel the first time.
                 if self.browser_state.is_none() {
-                    let start_dir = self.video_path
-                        .as_deref()
-                        .and_then(|p| p.parent())
-                        .map(|p| p.to_path_buf())
-                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-                    let target_fmt = vr.swapchain_format;
-
-                    self.browser_state = Some(BrowserState::new(
-                        start_dir,
-                        self.video_path.clone(),
-                    ));
-                    // 800×600 px canvas displayed at 1.6 m × 1.2 m, centred at eye level.
+                    let start_loc = match self.video_source.as_deref() {
+                        Some(s) if is_url(s) => {
+                            Location::Remote(crate::net::parent_url(s))
+                        }
+                        Some(s) => {
+                            let p = std::path::Path::new(s);
+                            Location::Local(
+                                p.parent().map(|d| d.to_path_buf())
+                                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
+                            )
+                        }
+                        None => Location::Local(std::env::current_dir().unwrap_or_default()),
+                    };
+                    let current_loc = self.video_source.as_deref().map(source_to_location);
+                    self.browser_state = Some(BrowserState::new(start_loc, current_loc));
                     self.browser_panel = Some(PanelRenderer::new(
-                        &renderer.device,
-                        target_fmt,
-                        800,
-                        600,
+                        &renderer.device, vr.swapchain_format,
+                        800, 600,
                         glam::Vec3::new(0.0, 1.2, -2.0),
-                        1.6,
-                        1.2,
+                        1.6, 1.2,
                     ));
                 }
                 self.panel_mode = PanelMode::Browser;
             }
 
-            // ── B / Y button: back button ──────────────────────────────────
-            // Hidden      → show control bar (and pointers)
-            // ControlBar  → hide control bar (and pointers)
-            // Settings    → back to control bar
-            // Browser     → back to control bar
             if actions.menu_toggle {
                 self.panel_mode = match self.panel_mode {
                     PanelMode::Hidden     => PanelMode::ControlBar,
