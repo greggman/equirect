@@ -4,7 +4,7 @@
 
 A Rust VR Video Player
 
-[Download here](https://github.com/greggman/equirect/releases/latest)
+[Download here](https://github.com/greggman/equirect/releases/latest) (exe or installer, both should work)
 
 [Instructions Below](#instructions)
 
