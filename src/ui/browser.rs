@@ -176,34 +176,55 @@ impl BrowserState {
     }
 
     fn refresh_local(&mut self, path: &PathBuf) {
-        self.entries.clear();
-        self.entries.push(BrowserEntry::Parent);
+        self.entries = load_local_entries(path);
+    }
+}
 
-        let mut dirs:   Vec<(String, PathBuf)> = Vec::new();
-        let mut videos: Vec<(String, PathBuf)> = Vec::new();
+/// Build a full directory listing for a local path in the same format the
+/// browser uses (Parent first, then sorted dirs, then sorted videos).
+/// Exposed so other code (e.g. prev/next navigation) can share it.
+pub fn load_local_entries(path: &PathBuf) -> Vec<BrowserEntry> {
+    let mut dirs:   Vec<(String, PathBuf)> = Vec::new();
+    let mut videos: Vec<(String, PathBuf)> = Vec::new();
 
-        if let Ok(rd) = std::fs::read_dir(path) {
-            for entry in rd.flatten() {
-                let p    = entry.path();
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') { continue; }
-                if p.is_dir() {
-                    dirs.push((name, p));
-                } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                    if VIDEO_EXTS.iter().any(|&v| v.eq_ignore_ascii_case(ext)) {
-                        videos.push((name, p));
-                    }
+    if let Ok(rd) = std::fs::read_dir(path) {
+        for entry in rd.flatten() {
+            let p    = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') { continue; }
+            if p.is_dir() {
+                dirs.push((name, p));
+            } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                if VIDEO_EXTS.iter().any(|&v| v.eq_ignore_ascii_case(ext)) {
+                    videos.push((name, p));
                 }
             }
         }
-
-        dirs.sort_by(  |(a, _), (b, _)| a.cmp(b));
-        videos.sort_by(|(a, _), (b, _)| a.cmp(b));
-
-        for (name, p) in dirs   { self.entries.push(BrowserEntry::Dir  (name, Location::Local(p))); }
-        for (name, p) in videos { self.entries.push(BrowserEntry::Video(name, Location::Local(p))); }
     }
+
+    dirs.sort_by(  |(a, _), (b, _)| a.cmp(b));
+    videos.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    let mut entries = vec![BrowserEntry::Parent];
+    for (name, p) in dirs   { entries.push(BrowserEntry::Dir  (name, Location::Local(p))); }
+    for (name, p) in videos { entries.push(BrowserEntry::Video(name, Location::Local(p))); }
+    entries
 }
+
+/// Build entries from a remote HTTP listing in the same format the browser uses.
+pub fn remote_entries(items: Vec<crate::net::RemoteItem>) -> Vec<BrowserEntry> {
+    let mut entries = vec![BrowserEntry::Parent];
+    for item in items {
+        let loc = Location::Remote(item.url);
+        if item.is_dir {
+            entries.push(BrowserEntry::Dir(item.name, loc));
+        } else {
+            entries.push(BrowserEntry::Video(item.name, loc));
+        }
+    }
+    entries
+}
+
 
 // ── draw ──────────────────────────────────────────────────────────────────────
 

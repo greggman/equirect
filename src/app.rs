@@ -11,7 +11,7 @@ use winit::{
 
 use crate::pointer_renderer::PointerRenderer;
 use crate::renderer::Renderer;
-use crate::ui::browser::{BrowserEntry, BrowserState, Location, VIDEO_EXTS};
+use crate::ui::browser::{BrowserEntry, BrowserState, Location};
 use crate::ui::settings::VideoSettings;
 use crate::video_layer::{VideoSwapchain, use_xr_layer};
 use crate::video_meta;
@@ -44,6 +44,57 @@ fn source_to_location(s: &str) -> Location {
     }
 }
 
+/// Returns the source string of the video `delta` steps away from `current`
+/// in a sorted folder listing.  Uses the folder cache; falls back to a fresh
+/// read (blocking for remote) and caches the result.
+fn adjacent_video(
+    current: &str,
+    folder_cache: &mut std::collections::HashMap<String, Vec<BrowserEntry>>,
+    delta: i32,
+) -> Option<String> {
+    use crate::ui::browser::{load_local_entries, remote_entries};
+
+    let parent_loc = if is_url(current) {
+        Location::Remote(crate::net::parent_url(current))
+    } else {
+        let p = std::path::Path::new(current);
+        Location::Local(p.parent()?.to_path_buf())
+    };
+
+    let key = cache_key(&parent_loc);
+
+    let entries: Vec<BrowserEntry> = if let Some(cached) = folder_cache.get(&key) {
+        cached.clone()
+    } else {
+        let fresh = match &parent_loc {
+            Location::Local(dir) => load_local_entries(dir),
+            Location::Remote(url) => {
+                match crate::net::list_http_dir(url) {
+                    Ok(items) => remote_entries(items),
+                    Err(e) => { eprintln!("prev/next: listing {url} failed: {e}"); return None; }
+                }
+            }
+        };
+        folder_cache.insert(key, fresh.clone());
+        fresh
+    };
+
+    let videos: Vec<String> = entries.iter().filter_map(|e| {
+        if let BrowserEntry::Video(_, loc) = e {
+            Some(location_to_source(loc.clone()))
+        } else {
+            None
+        }
+    }).collect();
+
+    if videos.is_empty() { return None; }
+    let n   = videos.len() as i32;
+    let pos = videos.iter().position(|v: &String| {
+        v.trim_end_matches('/') == current.trim_end_matches('/')
+    })? as i32;
+    Some(videos[((pos + delta).rem_euclid(n)) as usize].clone())
+}
+
 fn cache_key(loc: &Location) -> String {
     match loc {
         Location::Local(p)  => p.to_string_lossy().into_owned(),
@@ -74,29 +125,6 @@ fn save_meta(source: &str, meta: &video_meta::VideoMeta) {
     }
 }
 
-/// Returns the path of the video that is `delta` steps away from the current
-/// one in a sorted directory listing.  Only meaningful for local files.
-fn adjacent_video(current: &str, delta: i32) -> Option<String> {
-    let p = std::path::Path::new(current);
-    let dir = p.parent()?;
-    let mut videos: Vec<PathBuf> = std::fs::read_dir(dir).ok()?
-        .flatten()
-        .filter_map(|e| {
-            let vp = e.path();
-            let ext = vp.extension().and_then(|x| x.to_str())?;
-            if VIDEO_EXTS.iter().any(|&v| v.eq_ignore_ascii_case(ext)) {
-                Some(vp)
-            } else {
-                None
-            }
-        })
-        .collect();
-    if videos.is_empty() { return None; }
-    videos.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
-    let n   = videos.len() as i32;
-    let pos = videos.iter().position(|vp| vp == p)? as i32;
-    Some(videos[((pos + delta).rem_euclid(n)) as usize].to_string_lossy().into_owned())
-}
 
 // ── App ───────────────────────────────────────────────────────────────────────
 
@@ -588,15 +616,14 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // ── prev / next video (local files only) ──────────────────────────
+            // ── prev / next video ─────────────────────────────────────────────
             let nav_delta: Option<i32> = if actions.prev { Some(-1) }
                 else if actions.next { Some(1) }
                 else { None };
 
             if let Some(delta) = nav_delta {
                 let next = self.video_source.as_deref()
-                    .filter(|s| !is_url(s))
-                    .and_then(|s| adjacent_video(s, delta));
+                    .and_then(|s| adjacent_video(s, &mut self.folder_cache, delta));
 
                 if let Some(new_source) = next {
                     let target_fmt = vr.swapchain_format;
