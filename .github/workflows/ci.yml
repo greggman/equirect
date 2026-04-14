@@ -24,7 +24,10 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/release/incremental
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
