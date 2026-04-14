@@ -71,6 +71,7 @@ The controls are supposed to be
 
 * `B` / `Y` make the control panel appear / disappear
 * `A` / `X` select a button
+* `grip` reset-view
 
 The control panel has the following icons
 
@@ -94,6 +95,15 @@ the settings of the last video you played.
 
 The next time you run the app it will start in the browse UI
 at the last folder you used.
+
+#### Reset View
+
+The app tries to always start the way you are facing, not the orientation
+of your setup like many apps. Further, the 'grip' buttons reset the view
+to your current view *IN 3D*. That means if you look up at the ceiling and
+press the `grip` button, the ceiling will now be where you need to look.
+This means you can orient the video anywhere that is comfortable. Just look
+the direction you want to be the *neutral* position, then press `grip`.
 
 ### Command Line
 
