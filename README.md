@@ -112,9 +112,9 @@ To re-generate the icon texture atlas and the logo
 
 ```sh
 npx svg-texture-atlas 128 resources/icons resource/icons
-npx svg-to-png resources/images/equirect.svg resources/equirect.png 640
-npx svg-to-png resources/images/equirect.svg resources/images/icon-32x32.png 32 32
-npx svg-to-png resources/images/equirect.svg resources/images/icon-128x128.png 128 128
+npx @greggman/svg-to-png resources/images/equirect.svg resources/equirect.png 640
+npx @greggman/svg-to-png resources/images/equirect.svg resources/images/icon-32x32.png 32 32
+npx @greggman/svg-to-png resources/images/equirect.svg resources/images/icon-128x128.png 128 128
 ```
 
 Yea, I should add that to build but I don't expect to have to regenerate them often.
