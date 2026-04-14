@@ -132,6 +132,49 @@ impl Ola {
     }
 }
 
+// ── Linear resampler ─────────────────────────────────────────────────────────
+
+/// Simple linear-interpolation resampler for 1× playback when the file sample
+/// rate differs from the device rate.  Sounds transparent for small ratios.
+struct LinearResampler {
+    ratio: f64,          // file_sr / device_sr  (step in input per output sample)
+    pos:   f64,          // fractional read position within buf (in frames)
+    buf:   VecDeque<f32>, // interleaved input frames
+    ch:    usize,
+}
+
+impl LinearResampler {
+    fn new(file_sr: u32, device_sr: u32, ch: usize) -> Self {
+        Self { ratio: file_sr as f64 / device_sr as f64, pos: 0.0, buf: VecDeque::new(), ch }
+    }
+
+    fn reset(&mut self) { self.buf.clear(); self.pos = 0.0; }
+
+    fn fill(&mut self, output: &mut [f32], rx: &Receiver<f32>) {
+        let ch = self.ch;
+        let frames_out = output.len() / ch;
+        for i in 0..frames_out {
+            let i0   = self.pos as usize;
+            let i1   = i0 + 1;
+            let frac = (self.pos - i0 as f64) as f32;
+            while self.buf.len() < (i1 + 1) * ch {
+                for _ in 0..ch { self.buf.push_back(rx.try_recv().unwrap_or(0.0)); }
+            }
+            for c in 0..ch {
+                let s0 = self.buf[i0 * ch + c];
+                let s1 = self.buf[i1 * ch + c];
+                output[i * ch + c] = s0 + (s1 - s0) * frac;
+            }
+            self.pos += self.ratio;
+        }
+        let drain = self.pos as usize;
+        if drain > 0 && drain * ch <= self.buf.len() {
+            self.buf.drain(..drain * ch);
+            self.pos -= drain as f64;
+        }
+    }
+}
+
 // ── AudioPlayer ───────────────────────────────────────────────────────────────
 
 pub struct AudioPlayer {
@@ -152,15 +195,27 @@ impl AudioPlayer {
     ) -> Option<Self> {
         let host   = cpal::default_host();
         let device = host.default_output_device()?;
+
+        // Use the device's preferred sample rate.  If the file rate differs,
+        // fold the ratio into the OLA speed so pitch and timing stay correct.
+        let device_sr = device.default_output_config()
+            .map(|c| c.sample_rate().0)
+            .unwrap_or(sample_rate);
+        let file_sr = sample_rate;
+
         let config = cpal::StreamConfig {
             channels,
-            sample_rate: cpal::SampleRate(sample_rate),
+            sample_rate: cpal::SampleRate(device_sr),
             buffer_size: cpal::BufferSize::Default,
         };
+
+        eprintln!("Audio: device={:?} file_sr={file_sr} device_sr={device_sr} ch={channels}",
+                  device.name());
 
         let mut last_flush = flush_gen.load(Ordering::Relaxed);
         let mut last_idx   = 0_usize;
         let mut ola        = Ola::new(channels as usize);
+        let mut linear     = LinearResampler::new(file_sr, device_sr, channels as usize);
 
         let stream = device
             .build_output_stream(
@@ -172,6 +227,7 @@ impl AudioPlayer {
                         last_flush = cur;
                         while rx.try_recv().is_ok() {}
                         ola.reset();
+                        linear.reset();
                         for s in data.iter_mut() { *s = 0.0; }
                         return;
                     }
@@ -185,31 +241,41 @@ impl AudioPlayer {
 
                     let idx = speed_index.load(Ordering::Relaxed) as usize;
 
-                    // Reset OLA when transitioning back to 1× so stale overlap
-                    // state doesn't bleed into the next slow-motion session.
-                    if idx == 0 && last_idx != 0 {
-                        ola.reset();
-                    }
+                    // Reset OLA when transitioning back to 1×.
+                    if idx == 0 && last_idx != 0 { ola.reset(); }
+                    // Reset linear resampler when transitioning to slow-motion.
+                    if idx != 0 && last_idx == 0 { linear.reset(); }
                     last_idx = idx;
 
-                    // ── 1× pass-through (no processing) ─────────────────────
                     if idx == 0 {
-                        for s in data.iter_mut() {
-                            *s = rx.try_recv().unwrap_or(0.0);
+                        if device_sr == file_sr {
+                            // ── 1× pass-through, rates match ─────────────────
+                            for s in data.iter_mut() { *s = rx.try_recv().unwrap_or(0.0); }
+                        } else {
+                            // ── 1× with sample-rate conversion ───────────────
+                            linear.fill(data, &rx);
                         }
-                        return;
+                    } else {
+                        // ── slow-motion OLA (fold resample ratio into speed) ──
+                        let speed = SPEEDS[idx.min(SPEEDS.len() - 1)]
+                            * (file_sr as f32 / device_sr as f32);
+                        ola.fill(data, &rx, speed);
                     }
-
-                    // ── slow-motion OLA ──────────────────────────────────────
-                    let speed = SPEEDS[idx.min(SPEEDS.len() - 1)];
-                    ola.fill(data, &rx, speed);
                 },
                 |err| eprintln!("Audio stream error: {err}"),
                 None,
-            )
-            .ok()?;
+            );
 
-        stream.play().ok()?;
+        let stream = match stream {
+            Ok(s)  => s,
+            Err(e) => { eprintln!("Audio: build_output_stream failed: {e}"); return None; }
+        };
+
+        if let Err(e) = stream.play() {
+            eprintln!("Audio: play() failed: {e}");
+            return None;
+        }
+        eprintln!("Audio: stream started ok");
         Some(Self { _stream: stream })
     }
 }

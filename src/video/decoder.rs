@@ -919,8 +919,20 @@ fn open_and_decode_audio(
     unsafe {
         reader.SetStreamSelection(ALL_STREAMS, false).ok();
         if reader.SetStreamSelection(FIRST_AUDIO, true).is_err() {
+            eprintln!("Audio: no audio stream found in {source}");
             let _ = format_tx.send(None);
-            return Ok(()); // no audio stream
+            return Ok(());
+        }
+    }
+
+    // Log the native audio format before we try to convert it.
+    unsafe {
+        if let Ok(native) = reader.GetNativeMediaType(FIRST_AUDIO, 0) {
+            let subtype = native.GetGUID(&MF_MT_SUBTYPE).unwrap_or_default();
+            let sr = native.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND).unwrap_or(0);
+            let ch = native.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS).unwrap_or(0);
+            let bps = native.GetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE).unwrap_or(0);
+            eprintln!("Audio: native format subtype={subtype:?} {sr}Hz {ch}ch {bps}bps");
         }
     }
 
@@ -931,7 +943,9 @@ fn open_and_decode_audio(
         out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).ok();
         out_type.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_Float).ok();
         out_type.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 32).ok();
-        reader.SetCurrentMediaType(FIRST_AUDIO, None, &out_type).is_ok()
+        let r = reader.SetCurrentMediaType(FIRST_AUDIO, None, &out_type);
+        if r.is_err() { eprintln!("Audio: SetCurrentMediaType(Float) failed: {r:?}"); }
+        r.is_ok()
     };
 
     if !format_ok {
@@ -947,7 +961,7 @@ fn open_and_decode_audio(
         let ch = cur.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS).unwrap_or(2) as u16;
         (sr, ch)
     };
-    vprintln!("Audio: {sample_rate} Hz, {channels} ch");
+    eprintln!("Audio: {sample_rate} Hz, {channels} ch");
     let _ = format_tx.send(Some((sample_rate, channels)));
 
     loop {
