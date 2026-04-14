@@ -2,13 +2,20 @@
 
 <img alt="Equirect logo" src="resources/images/equirect.svg" width="400">
 
-A Rust VR Video Player
+A Privacy First Rust VR Video Player
 
 [Download here](https://github.com/greggman/equirect/releases/latest) (exe or installer, both should work)
 
 [Instructions Below](#instructions)
 
----
+## Privacy First
+
+Unlike other VR video apps, this app does **ZERO DATA COLLECTION!**
+Apps like DeoVR claim to monitor and share almost all viewing.
+Apps like SkyboxVR, Pigasus, and most others claim to monitor less
+but still not zero.
+
+## Making Of Notes
 
 Hopefully this is portable or a step at being portable. It uses WebGPU for the
 graphics so could potentially run on Metal. It uses OpenXR for VR parts.
