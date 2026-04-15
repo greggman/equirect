@@ -67,6 +67,20 @@ pub fn sprite_uv(sprite: IconSprite) -> egui::Rect {
     )
 }
 
+// ── Image helper ─────────────────────────────────────────────────────────────
+
+/// Build an `egui::Image` for a sprite at the given display size.
+/// Useful when constructing a `Button::image(...)` manually (e.g. with `add_enabled`).
+pub fn icon_image(ctx: &egui::Context, sprite: IconSprite, size: f32) -> egui::Image<'static> {
+    let texture = get_texture(ctx);
+    let uv = sprite_uv(sprite);
+    egui::Image::from_texture(egui::load::SizedTexture::new(
+        texture.id(),
+        egui::vec2(size, size),
+    ))
+    .uv(uv)
+}
+
 // ── Button helpers ────────────────────────────────────────────────────────────
 
 /// Render an icon button and return its raw `egui::Response`.

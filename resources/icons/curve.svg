@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Generator: Blender, SVG Export for Grease Pencil - v2.0 -->
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" x="0px" y="0px" xmlns="http://www.w3.org/2000/svg" width="1189.235474px" height="1215.164185px" viewBox="0 0 1189.235474 1215.164185">
+	<g id="blender_frame.1">
+		<g id="blender_object.Cylinder.1.uuid_0x0">
+			<g id="layer.Lines.uuid_0x1">
+				<polyline stroke-width="8" points="651.97473,812.8645 744.3722,854.4918" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="651.97473,812.8645 717.73987,42.627197" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="651.97473,812.8645 553.50696,781.71906" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="717.73987,42.627197 829.871,60.723267" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="717.73987,42.627197 600.34314,29.230835" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="744.3722,854.4918 829.871,60.723267" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="744.3722,854.4918 828.1415,906.84326" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="829.871,60.723267 934.1293,83.79785" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="828.1415,906.84326 934.1293,83.79785" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="828.1415,906.84326 900.0846,970.002" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="934.1293,83.79785 1026.9872,112.11572" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="900.0846,970.002 1026.9872,112.11572" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="900.0846,970.002 956.2709,1043.7034" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="1026.9872,112.11572 1103.7501,145.84363" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="956.2709,1043.7034 1103.7501,145.84363" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="956.2709,1043.7034 992.03674,1127.0739" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="1103.7501,145.84363 1158.371,184.91284" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="992.03674,1127.0739 1158.371,184.91284" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="992.03674,1127.0739 1000.0365,1198.8081 1178.0785,219.33514 1158.371,184.91284" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="135.42798,757.454 110.87378,18.877563" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="135.42798,757.454 53.60498,772.25635 14.72644,25.184814 110.87378,18.877563" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="135.42798,757.454 240.552,748.7209" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="110.87378,18.877563 233.72754,15.169189" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="240.552,748.7209 233.72754,15.169189" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="240.552,748.7209 346.21362,749.82544" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="233.72754,15.169189 357.00488,15.637695" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="346.21362,749.82544 357.00488,15.637695" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="346.21362,749.82544 451.0227,760.78125" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="357.00488,15.637695 479.60913,20.292969" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="451.0227,760.78125 479.60913,20.292969" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="451.0227,760.78125 553.50696,781.71906" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="479.60913,20.292969 600.34314,29.230835" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="553.50696,781.71906 600.34314,29.230835" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+			</g>
+			<g id="layer.Fills.uuid_0x2" />
+		</g>
+	</g>
+</svg>

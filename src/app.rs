@@ -766,7 +766,7 @@ impl ApplicationHandler for App {
                 if self.settings_panel.is_none() {
                     self.settings_panel = Some(PanelRenderer::new(
                         &renderer.device, vr.swapchain_format,
-                        800, 500,
+                        800, 600,
                         glam::Vec3::new(0.0, 1.2, -2.0),
                         1.6, 1.0,
                     ));

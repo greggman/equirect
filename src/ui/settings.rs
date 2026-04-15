@@ -56,6 +56,7 @@ pub fn draw(
     interaction: Option<(egui::Pos2, egui::Pos2)>,
 ) -> SettingsActions {
     use super::icons;
+    use super::icons::IconSprite;
     use super::ResponseExt as _;
     let mut actions = SettingsActions::default();
 
@@ -97,25 +98,24 @@ pub fn draw(
         ui.label(egui::RichText::new(text).font(egui::FontId::proportional(16.0)).color(color));
     };
 
+    const ICON_SIZE: f32 = 96.0;
+
     // ── 1. Video mode ─────────────────────────────────────────────────────────
     section_label(ui, "Video Mode", true);
     ui.horizontal(|ui| {
-        ui.style_mut().text_styles.insert(egui::TextStyle::Button, font.clone());
         ui.spacing_mut().button_padding = btn_pad;
 
-        let modes: &[(&str, VideoMode)] = &[
-            ("2D",       VideoMode::Flat2D),
-            ("2D Curve", VideoMode::Curved2D),
-            ("3D",       VideoMode::Sbs3D),
-            ("180",      VideoMode::View180),
-            ("360",      VideoMode::View360),
+        let icon_modes: &[(IconSprite, VideoMode)] = &[
+            (icons::ICON_PLANE,      VideoMode::Flat2D),
+            (icons::ICON_CURVE,      VideoMode::Curved2D),
+            (icons::ICON_3D,         VideoMode::Sbs3D),
+            (icons::ICON_HEMISPHERE, VideoMode::View180),
+            (icons::ICON_SPHERE,     VideoMode::View360),
         ];
-        for &(label, mode) in modes {
+        for &(icon, mode) in icon_modes {
             let selected = state.mode == mode;
-            let btn = egui::Button::new(label).selected(selected);
-            if ui.add(btn).activated_by(interaction) && !selected {
+            if icons::icon_button_selected(ui, icon, selected, ICON_SIZE, interaction) && !selected {
                 state.mode = mode;
-                // Reset sub-options that may not be valid in new mode.
                 if !matches!(state.mode, VideoMode::View180 | VideoMode::View360) {
                     state.proj = Projection::default();
                 }
@@ -131,17 +131,15 @@ pub fn draw(
     // ── 2. Projection ─────────────────────────────────────────────────────────
     section_label(ui, "Projection", proj_enabled);
     ui.add_enabled_ui(proj_enabled, |ui| {
-        ui.style_mut().text_styles.insert(egui::TextStyle::Button, font.clone());
         ui.spacing_mut().button_padding = btn_pad;
         ui.horizontal(|ui| {
-            let projs: &[(&str, Projection)] = &[
-                ("Equirect", Projection::Equirect),
-                ("Fisheye",  Projection::Fisheye),
+            let projs: &[(IconSprite, Projection)] = &[
+                (icons::ICON_EQUIRECT, Projection::Equirect),
+                (icons::ICON_FISHEYE,  Projection::Fisheye),
             ];
-            for &(label, proj) in projs {
+            for &(icon, proj) in projs {
                 let selected = state.proj == proj;
-                let btn = egui::Button::new(label).selected(selected);
-                if ui.add(btn).activated_by(interaction) && !selected && proj_enabled {
+                if icons::icon_button_selected(ui, icon, selected, ICON_SIZE, interaction) && !selected && proj_enabled {
                     state.proj = proj;
                     actions.changed = true;
                 }
@@ -153,22 +151,24 @@ pub fn draw(
     // ── 3. Stereo layout ──────────────────────────────────────────────────────
     section_label(ui, "Stereo Layout", stereo_enabled);
     ui.add_enabled_ui(stereo_enabled, |ui| {
-        ui.style_mut().text_styles.insert(egui::TextStyle::Button, font.clone());
         ui.spacing_mut().button_padding = btn_pad;
         ui.horizontal(|ui| {
             // "One View" only makes sense for 180/360 (not plain 3D).
             let one_view_ok = matches!(state.mode, VideoMode::View180 | VideoMode::View360);
-            let layouts: &[(&str, StereoLayout, bool)] = &[
-                ("One View", StereoLayout::OneView, one_view_ok),
-                ("L/R",      StereoLayout::LR,      true),
-                ("R/L",      StereoLayout::RL,      true),
-                ("T/B",      StereoLayout::TB,      true),
-                ("B/T",      StereoLayout::BT,      true),
+            let layouts: &[(IconSprite, StereoLayout, bool)] = &[
+                (icons::ICON_ONEVIEW, StereoLayout::OneView, one_view_ok),
+                (icons::ICON_LR,      StereoLayout::LR,      true),
+                (icons::ICON_RL,      StereoLayout::RL,      true),
+                (icons::ICON_TB,      StereoLayout::TB,      true),
+                (icons::ICON_BT,      StereoLayout::BT,      true),
             ];
-            for &(label, layout, avail) in layouts {
+            for &(icon, layout, avail) in layouts {
                 let selected = state.stereo == layout;
-                let btn = egui::Button::new(label).selected(selected);
-                let resp = ui.add_enabled(avail, btn);
+                let resp = ui.add_enabled(
+                    avail,
+                    egui::Button::image(icons::icon_image(ui.ctx(), icon, ICON_SIZE))
+                        .selected(selected),
+                );
                 if resp.activated_by(interaction) && !selected && stereo_enabled && avail {
                     state.stereo = layout;
                     actions.changed = true;

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Generator: Blender, SVG Export for Grease Pencil - v2.0 -->
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" x="0px" y="0px" xmlns="http://www.w3.org/2000/svg" width="1104.041992px" height="1118.711548px" viewBox="0 0 1104.041992 1118.711548">
+	<g id="blender_frame.1">
+		<g id="blender_object.Cube.002.1.uuid_0x0">
+			<g id="layer.Lines.uuid_0x1">
+				<polyline stroke-width="8" points="85.752625,855.23486 489.15863,583.8496" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="85.752625,855.23486 10.513794,155.50916" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="85.752625,855.23486 715.8669,1108.1814" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="10.513794,155.50916 478.45087,10.81897" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="10.513794,155.50916 741.1534,298.64984" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="489.15863,583.8496 478.45087,10.81897" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="489.15863,583.8496 1031.4636,738.6532" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="478.45087,10.81897 1093.3413,92.27295" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="715.8669,1108.1814 1031.4636,738.6532" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="715.8669,1108.1814 741.1534,298.64984" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="741.1534,298.64984 1093.3413,92.27295" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+				<polyline stroke-width="8" points="1031.4636,738.6532 1093.3413,92.27295" stroke="rgb(235,235,235)" stroke-opacity="1" fill="none" stroke-linecap="round" />
+			</g>
+			<g id="layer.Fills.uuid_0x2" />
+		</g>
+	</g>
+</svg>
