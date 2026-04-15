@@ -172,6 +172,10 @@ pub struct App {
     panel_mode: PanelMode,
     seek_target_secs: Option<f64>,
     seek_timeout: Option<std::time::Instant>,
+    /// IPC receiver: messages from a second-instance launch (file path or URL).
+    ipc_rx: std::sync::mpsc::Receiver<String>,
+    /// Pending IPC-requested video source, queued until VR is ready.
+    pending_ipc_source: Option<String>,
 }
 
 
@@ -179,6 +183,7 @@ impl App {
     pub fn new(
         video_source: Option<String>,
         initial_browser_dir: Option<PathBuf>,
+        ipc_rx: std::sync::mpsc::Receiver<String>,
     ) -> Self {
         let panel_mode = if video_source.is_none() && initial_browser_dir.is_some() {
             PanelMode::Browser
@@ -205,6 +210,8 @@ impl App {
             panel_mode,
             seek_target_secs: None,
             seek_timeout: None,
+            ipc_rx,
+            pending_ipc_source: None,
         }
     }
 }
@@ -358,6 +365,15 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let Some(renderer) = &self.renderer else { return };
 
+        // Poll IPC channel for messages from a second instance.
+        while let Ok(msg) = self.ipc_rx.try_recv() {
+            if msg.is_empty() {
+                renderer.window().focus_window();
+            } else {
+                self.pending_ipc_source = Some(msg);
+            }
+        }
+
         if self.control_bar_state.duration_secs == 0.0 {
             if let Some(dec) = &self.video_decoder {
                 if dec.duration_us > 0 {
@@ -497,7 +513,8 @@ impl ApplicationHandler for App {
                 }
             }
 
-            if let Some(play_loc) = browser_actions.play {
+            // Determine whether we're loading a new source from the browser or from IPC.
+            let play_source: Option<String> = if let Some(play_loc) = browser_actions.play {
                 if let Location::Local(ref p) = play_loc {
                     if let Some(parent) = p.parent() {
                         video_meta::save_last_dir(parent);
@@ -506,8 +523,44 @@ impl ApplicationHandler for App {
                 self.browser_state = None;
                 self.browser_panel = None;
                 self.panel_mode    = PanelMode::Hidden;
+                Some(location_to_source(play_loc))
+            } else if let Some(src) = self.pending_ipc_source.take() {
+                renderer.window().focus_window();
+                // Directory → open browser there; file/URL → play as video.
+                if std::path::Path::new(&src).is_dir() {
+                    let dir = std::path::PathBuf::from(&src);
+                    video_meta::save_last_dir(&dir);
+                    let current_loc = self.video_source.as_deref().map(source_to_location);
+                    let loc = Location::Local(dir);
+                    let cached = self.folder_cache.get(&cache_key(&loc)).cloned();
+                    self.browser_state = Some(BrowserState::new(loc, current_loc, cached));
+                    if self.browser_panel.is_none() {
+                        self.browser_panel = Some(PanelRenderer::new(
+                            &renderer.device, vr.swapchain_format,
+                            800, 600,
+                            glam::Vec3::new(0.0, 1.2, -2.0),
+                            1.6, 1.2,
+                        ));
+                    }
+                    self.panel_mode = PanelMode::Browser;
+                    None
+                } else {
+                    let loc = source_to_location(&src);
+                    if let Location::Local(ref p) = loc {
+                        if let Some(parent) = p.parent() {
+                            video_meta::save_last_dir(parent);
+                        }
+                    }
+                    self.browser_state = None;
+                    self.browser_panel = None;
+                    self.panel_mode    = PanelMode::Hidden;
+                    Some(src)
+                }
+            } else {
+                None
+            };
 
-                let new_source = location_to_source(play_loc);
+            if let Some(new_source) = play_source {
                 let target_fmt = vr.swapchain_format;
 
                 self.video_settings = load_meta(&new_source)
