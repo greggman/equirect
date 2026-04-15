@@ -121,7 +121,7 @@ nginx etc and to should let you access your videos.
 To re-generate the icon texture atlas and the logo
 
 ```sh
-npx svg-texture-atlas 128 resources/icons resource/icons
+npx svg-texture-atlas 128 resources/icons resources/icons
 npx @greggman/svg-to-png resources/images/equirect.svg resources/equirect.png 640
 npx @greggman/svg-to-png resources/images/equirect.svg resources/images/icon-32x32.png 32 32
 npx @greggman/svg-to-png resources/images/equirect.svg resources/images/icon-128x128.png 128 128

@@ -118,6 +118,8 @@ Features:
 [*] webm
 [*] installer
 [*] Show the version somewhere
+[*] icons for settings
+[*] launch checks for existing instance and passes info?
 
 [ ] Make it run on Quest - add SMB support
   [ ] need settings to have way to add "roots" where each root is a SMB or webdav or HTTP
