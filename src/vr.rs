@@ -890,12 +890,12 @@ impl VrContext {
                             .sub_image(sub)
                             .pose(oriented_pose(2.5, 1.0, self.base_orientation))
                             .size(xr::Extent2Df {
-                                width:  w / zoom,
-                                height: h / zoom,
+                                width:  w * zoom,
+                                height: h * zoom,
                             });
                     }
                     EffectiveLayerMode::Cylinder => {
-                        let central_angle = std::f32::consts::PI * 2.0 / 3.0 / zoom; // 120°/zoom
+                        let central_angle = std::f32::consts::PI * 2.0 / 3.0 * zoom; // 120°*zoom
                         let radius        = 2.5_f32;
                         cyl_layers[i] = xr::CompositionLayerCylinderKHR::new()
                             .space(stage)
