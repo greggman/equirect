@@ -60,6 +60,86 @@ fn main() {
     std::fs::write(&out_path, out).expect("failed to write icons_data.rs");
 }
 
+/// Returns the version label to stamp on large icons.
+/// Release builds get `"v1.2.0"`; every other profile gets `"v1.2.0-dev"`.
+fn get_version_label() -> String {
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "?.?.?".to_string());
+    let profile = std::env::var("PROFILE").unwrap_or_default();
+    if profile == "release" {
+        format!("v{version}")
+    } else {
+        format!("v{version}-dev")
+    }
+}
+
+/// 3×5 pixel bitmaps for the characters used in version labels.
+/// Each `u8` is one row; bits 2..0 map to columns left→right.
+fn char_pixels(c: char) -> Option<[u8; 5]> {
+    Some(match c {
+        '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
+        '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
+        '2' => [0b111, 0b001, 0b011, 0b100, 0b111],
+        '3' => [0b111, 0b001, 0b011, 0b001, 0b111],
+        '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
+        '5' => [0b111, 0b100, 0b111, 0b001, 0b111],
+        '6' => [0b111, 0b100, 0b111, 0b101, 0b111],
+        '7' => [0b111, 0b001, 0b001, 0b001, 0b001],
+        '8' => [0b111, 0b101, 0b111, 0b101, 0b111],
+        '9' => [0b111, 0b101, 0b111, 0b001, 0b111],
+        '.' => [0b000, 0b000, 0b000, 0b010, 0b010],
+        '-' => [0b000, 0b000, 0b111, 0b000, 0b000],
+        'd' => [0b001, 0b001, 0b011, 0b101, 0b011],
+        'e' => [0b111, 0b100, 0b111, 0b100, 0b111],
+        'v' => [0b101, 0b101, 0b101, 0b010, 0b010],
+        _   => return None,
+    })
+}
+
+/// Stamp `label` in the bottom-left corner of `canvas`.
+/// The font is scaled up by `scale` pixels per source pixel.
+fn draw_version_label(
+    canvas: &mut image::ImageBuffer<image::Rgba<u8>, Vec<u8>>,
+    label: &str,
+    scale: u32,
+) {
+    const CHAR_W: u32 = 3;
+    const CHAR_H: u32 = 5;
+    const SPACING: u32 = 1; // pixels between characters (pre-scale)
+
+    let text_h = CHAR_H * scale;
+    let margin = 2 * scale;
+
+    let cw = canvas.width();
+    let ch = canvas.height();
+
+    let bg_x = margin;
+    let bg_y = ch.saturating_sub(text_h + margin * 3);
+
+    // White text.
+    let tx = bg_x + margin;
+    let ty = bg_y + margin;
+    for (i, c) in label.chars().enumerate() {
+        if let Some(bitmap) = char_pixels(c) {
+            let cx = tx + i as u32 * (CHAR_W + SPACING) * scale;
+            for (row, &bits) in bitmap.iter().enumerate() {
+                for col in 0..CHAR_W {
+                    if (bits >> (CHAR_W - 1 - col)) & 1 == 1 {
+                        for sy in 0..scale {
+                            for sx in 0..scale {
+                                let px = cx + col * scale + sx;
+                                let py = ty + row as u32 * scale + sy;
+                                if px < cw && py < ch {
+                                    canvas.put_pixel(px, py, image::Rgba([255, 255, 255, 255]));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Generate a multi-size .ico from resources/equirect.png and embed it into
 /// the Windows PE binary via winresource.  On non-Windows targets this is a
 /// no-op.
@@ -95,6 +175,12 @@ fn build_windows_icon() {
             let oy = (size - nh) / 2;
             for (x, y, px) in resized.to_rgba8().enumerate_pixels() {
                 canvas.put_pixel(ox + x, oy + y, *px);
+            }
+
+            // Stamp the version number on larger sizes where text is legible.
+            if size >= 256 {
+                let label = get_version_label();
+                draw_version_label(&mut canvas, &label, size / 64);
             }
 
             let img = ico::IconImage::from_rgba_data(size, size, canvas.into_raw());
