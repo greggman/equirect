@@ -74,7 +74,6 @@ fn single_instance(arg: Option<&str>) -> Option<std::sync::mpsc::Receiver<String
     };
 
     if server != INVALID_HANDLE_VALUE {
-        eprintln!("IPC: first instance, pipe server created");
         // We are the first instance — spawn the listener thread.
         // HANDLE is not Send; transmit as usize and reconstruct inside the thread.
         let server_raw = server.0 as usize;
@@ -111,7 +110,6 @@ fn single_instance(arg: Option<&str>) -> Option<std::sync::mpsc::Receiver<String
                         while let Some(pos) = acc.find('\n') {
                             let line = acc[..pos].to_string();
                             acc.drain(..=pos);
-                            eprintln!("IPC: server received {:?}", line);
                             let _ = tx.send(line);
                         }
                     }
@@ -127,15 +125,12 @@ fn single_instance(arg: Option<&str>) -> Option<std::sync::mpsc::Receiver<String
     // WaitNamedPipeW blocks until the server has called ConnectNamedPipe (i.e.,
     // it is actually ready to accept a connection).  This handles the race where
     // the server thread hasn't reached ConnectNamedPipe yet.
-    eprintln!("IPC: pipe already exists, waiting to connect as client...");
     if !unsafe { WaitNamedPipeW(pipe_pcwstr, 5000).as_bool() } {
-        eprintln!("IPC: WaitNamedPipeW timed out or failed — running standalone");
         // Timed out or failed — run as a standalone instance.
         let (_tx, rx) = std::sync::mpsc::channel::<String>();
         return Some(rx);
     }
 
-    eprintln!("IPC: pipe ready, connecting...");
     let client = unsafe {
         CreateFileW(
             pipe_pcwstr,
@@ -150,17 +145,14 @@ fn single_instance(arg: Option<&str>) -> Option<std::sync::mpsc::Receiver<String
 
     match client {
         Ok(handle) => {
-            eprintln!("IPC: connected, sending {:?}", arg);
             let msg = format!("{}\n", arg.unwrap_or(""));
             unsafe {
                 let _ = WriteFile(handle, Some(msg.as_bytes()), None, None);
                 let _ = CloseHandle(handle);
             }
-            eprintln!("IPC: message sent, exiting");
             None // Handed off to existing instance — caller should exit.
         }
-        Err(e) => {
-            eprintln!("IPC: CreateFileW failed after WaitNamedPipeW: {e} — running standalone");
+        Err(_) => {
             // Connection failed despite WaitNamedPipeW — run standalone.
             let (_tx, rx) = std::sync::mpsc::channel::<String>();
             Some(rx)

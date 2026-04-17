@@ -89,6 +89,7 @@ impl VideoDecoder {
         let seek_request    = Arc::new(Mutex::new(None::<u64>));
         let audio_seek      = Arc::new(AtomicU64::new(u64::MAX));
         let audio_flush_gen = Arc::new(AtomicU64::new(0));
+        let audio_started   = Arc::new(AtomicBool::new(false));
         let stop            = Arc::new(AtomicBool::new(false));
 
         // Bounded channel: ~2 seconds of float32 stereo audio at 48 kHz.
@@ -104,6 +105,9 @@ impl VideoDecoder {
         let lps_start_c  = Arc::clone(&loop_start_us);
         let lps_end_c    = Arc::clone(&loop_end_us);
         let seek_c       = Arc::clone(&seek_request);
+        let vid_audio_seek    = Arc::clone(&audio_seek);
+        let vid_audio_flush   = Arc::clone(&audio_flush_gen);
+        let vid_audio_started = Arc::clone(&audio_started);
 
         // Clone source string before moving it into the video thread.
         let audio_source    = source.clone();
@@ -120,7 +124,8 @@ impl VideoDecoder {
                 decode_thread(
                     source, init_tx, latest_clone,
                     pts_c, pau_c, spd_c,
-                    lps_c, lps_start_c, lps_end_c, seek_c, stop_video,
+                    lps_c, lps_start_c, lps_end_c, seek_c,
+                    vid_audio_seek, vid_audio_flush, vid_audio_started, stop_video,
                 )
             })?;
 
@@ -148,6 +153,7 @@ impl VideoDecoder {
                     Arc::clone(&paused),
                     Arc::clone(&speed_index),
                     Arc::clone(&audio_flush_gen),
+                    Arc::clone(&audio_started),
                 )
             });
 
@@ -194,6 +200,9 @@ fn decode_thread(
     loop_start_us:   Arc<AtomicU64>,
     loop_end_us:     Arc<AtomicU64>,
     seek_request:    Arc<Mutex<Option<u64>>>,
+    audio_seek:      Arc<AtomicU64>,
+    audio_flush_gen: Arc<AtomicU64>,
+    audio_started:   Arc<AtomicBool>,
     stop:            Arc<AtomicBool>,
 ) {
     use windows::Win32::Media::MediaFoundation::*;
@@ -213,7 +222,8 @@ fn decode_thread(
         match open_and_decode(
             source, init_tx, &latest,
             &current_pts_us, &paused, &speed_index,
-            &loop_state, &loop_start_us, &loop_end_us, &seek_request, &stop,
+            &loop_state, &loop_start_us, &loop_end_us, &seek_request,
+            &audio_seek, &audio_flush_gen, &audio_started, &stop,
         ) {
             Ok(()) => {}
             Err(e) => eprintln!("Video decoder error: {e}"),
@@ -357,6 +367,9 @@ fn open_and_decode(
     loop_start_us:   &Arc<AtomicU64>,
     loop_end_us:     &Arc<AtomicU64>,
     seek_request:    &Arc<Mutex<Option<u64>>>,
+    audio_seek:      &Arc<AtomicU64>,
+    audio_flush_gen: &Arc<AtomicU64>,
+    audio_started:   &Arc<AtomicBool>,
     stop:            &Arc<AtomicBool>,
 ) -> Result<()> {
     use windows::Win32::Media::MediaFoundation::*;
@@ -488,6 +501,9 @@ fn open_and_decode(
                 wall_start = None;
                 seek_until_us = Some(us);
                 decode_one = true; // show the seeked frame even if paused
+                // Mute audio until the new wall clock is established at the
+                // seek target frame, preventing stale/early audio from playing.
+                audio_started.store(false, Ordering::Release);
             }
         }
 
@@ -560,6 +576,9 @@ fn open_and_decode(
                     break 'decode;
                 }
             }
+            // Sync audio to the same loop point.
+            audio_seek.store(seek_to, Ordering::Relaxed);
+            audio_flush_gen.fetch_add(1, Ordering::Relaxed);
             wall_start   = None;
             seek_until_us = None;
             continue 'decode;
@@ -591,6 +610,9 @@ fn open_and_decode(
                         break 'decode;
                     }
                 }
+                // Sync audio to the same loop point.
+                audio_seek.store(seek_to, Ordering::Relaxed);
+                audio_flush_gen.fetch_add(1, Ordering::Relaxed);
                 null_sample_streak = 0;
                 wall_start    = None;
                 seek_until_us = None;
@@ -609,6 +631,9 @@ fn open_and_decode(
             if pts_us >= end {
                 let start = loop_start_us.load(Ordering::Relaxed);
                 unsafe { seek_reader_to(&reader, start) };
+                // Sync audio to the loop-start point.
+                audio_seek.store(start, Ordering::Relaxed);
+                audio_flush_gen.fetch_add(1, Ordering::Relaxed);
                 wall_start = None;
                 continue 'decode;
             }
@@ -625,6 +650,12 @@ fn open_and_decode(
             // Reached (or passed) the target: resume normal playback.
             seek_until_us = None;
             wall_start = None; // reset pacing so we don't try to make up lost time
+            // The first displayed frame may be slightly past the requested seek
+            // target due to keyframe alignment.  Sync audio to this exact PTS so
+            // it starts from the same frame as video (not from the originally
+            // requested position which may differ by up to one GOP).
+            audio_seek.store(pts_us, Ordering::Relaxed);
+            audio_flush_gen.fetch_add(1, Ordering::Relaxed);
         }
 
         // ── speed-adjusted pacing ──────────────────────────────────────────
@@ -633,6 +664,9 @@ fn open_and_decode(
             None => {
                 wall_start = Some(Instant::now());
                 pts_start = timestamp;
+                // Signal the audio callback that the video clock is now
+                // established — it can start playing from this moment.
+                audio_started.store(true, Ordering::Release);
             }
             Some(start) => {
                 let pts_elapsed_ns = (timestamp - pts_start).max(0) as u64 * 100;
@@ -893,7 +927,7 @@ fn open_and_decode_audio(
     _paused: &Arc<AtomicBool>,
     _speed_index: &Arc<AtomicU32>,
     audio_seek: &Arc<AtomicU64>,
-    audio_flush_gen: &Arc<AtomicU64>,
+    _audio_flush_gen: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
 ) -> Result<()> {
     use windows::Win32::Media::MediaFoundation::*;
@@ -925,16 +959,7 @@ fn open_and_decode_audio(
         }
     }
 
-    // Log the native audio format before we try to convert it.
-    unsafe {
-        if let Ok(native) = reader.GetNativeMediaType(FIRST_AUDIO, 0) {
-            let subtype = native.GetGUID(&MF_MT_SUBTYPE).unwrap_or_default();
-            let sr = native.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND).unwrap_or(0);
-            let ch = native.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS).unwrap_or(0);
-            let bps = native.GetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE).unwrap_or(0);
-            eprintln!("Audio: native format subtype={subtype:?} {sr}Hz {ch}ch {bps}bps");
-        }
-    }
+
 
     // Request 32-bit float PCM output.
     let format_ok = unsafe {
@@ -961,7 +986,6 @@ fn open_and_decode_audio(
         let ch = cur.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS).unwrap_or(2) as u16;
         (sr, ch)
     };
-    eprintln!("Audio: {sample_rate} Hz, {channels} ch");
     let _ = format_tx.send(Some((sample_rate, channels)));
 
     loop {
@@ -1006,9 +1030,11 @@ fn open_and_decode_audio(
         }
 
         if flags & 0x04 != 0 {
-            // EOF — flush buffered audio so the cpal callback doesn't play
-            // stale end-of-file samples, then seek back to loop with the video.
-            audio_flush_gen.fetch_add(1, Ordering::Relaxed);
+            // EOF — seek back to the start and keep filling.  The video decode
+            // thread owns loop synchronisation: it will set audio_seek and bump
+            // audio_flush_gen when it loops, so the cpal callback flushes stale
+            // audio at the correct moment.  Don't flush here — that would drain
+            // samples the cpal thread hasn't played yet.
             unsafe { seek_reader_to(&reader, 0) };
             continue;
         }

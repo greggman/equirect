@@ -192,6 +192,7 @@ impl AudioPlayer {
         paused: Arc<AtomicBool>,
         speed_index: Arc<AtomicU32>,
         flush_gen: Arc<AtomicU64>,
+        audio_started: Arc<AtomicBool>,
     ) -> Option<Self> {
         let host   = cpal::default_host();
         let device = host.default_output_device()?;
@@ -209,9 +210,6 @@ impl AudioPlayer {
             buffer_size: cpal::BufferSize::Default,
         };
 
-        eprintln!("Audio: device={:?} file_sr={file_sr} device_sr={device_sr} ch={channels}",
-                  device.name());
-
         let mut last_flush = flush_gen.load(Ordering::Relaxed);
         let mut last_idx   = 0_usize;
         let mut ola        = Ola::new(channels as usize);
@@ -228,6 +226,16 @@ impl AudioPlayer {
                         while rx.try_recv().is_ok() {}
                         ola.reset();
                         linear.reset();
+                        for s in data.iter_mut() { *s = 0.0; }
+                        return;
+                    }
+
+                    // ── wait for video first frame ───────────────────────────
+                    // Don't play audio until the video decoder has established
+                    // its wall clock (first frame decoded).  This ensures audio
+                    // and video both start from t=0 at the same moment regardless
+                    // of WASAPI warm-up time or file-system cache state.
+                    if !audio_started.load(Ordering::Acquire) {
                         for s in data.iter_mut() { *s = 0.0; }
                         return;
                     }
@@ -275,7 +283,6 @@ impl AudioPlayer {
             eprintln!("Audio: play() failed: {e}");
             return None;
         }
-        eprintln!("Audio: stream started ok");
         Some(Self { _stream: stream })
     }
 }
