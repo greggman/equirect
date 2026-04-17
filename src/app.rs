@@ -226,7 +226,11 @@ impl ApplicationHandler for App {
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("equirect")
+                        .with_title(if cfg!(debug_assertions) {
+                            concat!("equirect v", env!("CARGO_PKG_VERSION"), "-dev")
+                        } else {
+                            concat!("equirect v", env!("CARGO_PKG_VERSION"))
+                        })
                         .with_inner_size(winit::dpi::LogicalSize::new(640u32, 428u32)),
                 )
                 .expect("Failed to create window"),
