@@ -6,6 +6,7 @@ use std::sync::{
     mpsc::Receiver,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use crate::vprintln;
 
 use crate::ui::control_bar::SPEEDS;
 
@@ -193,9 +194,11 @@ impl AudioPlayer {
         speed_index: Arc<AtomicU32>,
         flush_gen: Arc<AtomicU64>,
         audio_started: Arc<AtomicBool>,
+        current_pts_us: Arc<AtomicU64>,
     ) -> Option<Self> {
         let host   = cpal::default_host();
         let device = host.default_output_device()?;
+        let device_name = device.name().unwrap_or_else(|_| "unknown".into());
 
         // Use the device's preferred sample rate.  If the file rate differs,
         // fold the ratio into the OLA speed so pitch and timing stay correct.
@@ -203,6 +206,16 @@ impl AudioPlayer {
             .map(|c| c.sample_rate().0)
             .unwrap_or(sample_rate);
         let file_sr = sample_rate;
+
+        vprintln!(
+            "Audio: device=\"{device_name}\"  file={file_sr} Hz  device={device_sr} Hz  channels={channels}"
+        );
+        if device_sr != file_sr {
+            vprintln!(
+                "Audio: sample-rate mismatch — resampling ratio {:.6}",
+                file_sr as f64 / device_sr as f64
+            );
+        }
 
         let config = cpal::StreamConfig {
             channels,
@@ -215,34 +228,60 @@ impl AudioPlayer {
         let mut ola        = Ola::new(channels as usize);
         let mut linear     = LinearResampler::new(file_sr, device_sr, channels as usize);
 
+        // A/V sync tracking (frames = per-channel sample count).
+        let ch            = channels as usize;
+        let log_interval  = device_sr as u64 * 5; // log every 5 s of playback
+        let mut frames_played: u64  = 0;
+        let mut next_log_at: u64    = log_interval;
+        let mut underruns: u32      = 0;
+        let mut first_callback      = true;
+        // Absolute video PTS at the time of the last flush, used to compute
+        // the true audio clock: audio_pts = audio_clock_origin + frames_played/sr.
+        let mut audio_clock_origin: u64 = 0;
+
         let stream = device
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    // ── seek flush ───────────────────────────────────────────
+                    // ── seek / unpause flush ─────────────────────────────────
                     let cur = flush_gen.load(Ordering::Relaxed);
                     if cur != last_flush {
+                        let mut drained = 0u32;
+                        while rx.try_recv().is_ok() { drained += 1; }
+                        audio_clock_origin = current_pts_us.load(Ordering::Relaxed);
+                        vprintln!("Audio: flush gen={cur} drained={drained} samples ({:.1} ms)  origin={:.3}s",
+                            drained as f64 / (ch as f64 * device_sr as f64) * 1000.0,
+                            audio_clock_origin as f64 / 1_000_000.0);
                         last_flush = cur;
-                        while rx.try_recv().is_ok() {}
                         ola.reset();
                         linear.reset();
+                        frames_played = 0;
+                        next_log_at   = log_interval;
+                        underruns     = 0;
                         for s in data.iter_mut() { *s = 0.0; }
                         return;
                     }
 
                     // ── wait for video first frame ───────────────────────────
-                    // Don't play audio until the video decoder has established
-                    // its wall clock (first frame decoded).  This ensures audio
-                    // and video both start from t=0 at the same moment regardless
-                    // of WASAPI warm-up time or file-system cache state.
                     if !audio_started.load(Ordering::Acquire) {
                         for s in data.iter_mut() { *s = 0.0; }
                         return;
                     }
 
+                    // ── first-callback diagnostics ───────────────────────────
+                    if first_callback {
+                        first_callback = false;
+                        vprintln!(
+                            "Audio: cpal buffer = {} samples ({} frames at {device_sr} Hz  {ch} ch)",
+                            data.len(), data.len() / ch,
+                        );
+                    }
+
                     // ── pause ────────────────────────────────────────────────
+                    // Do NOT drain the channel here; the audio decode thread is
+                    // already paused, so the buffer holds the audio we'll need
+                    // on unpause.  (Draining caused the thread to race ahead.)
                     if paused.load(Ordering::Relaxed) {
-                        while rx.try_recv().is_ok() {}
                         for s in data.iter_mut() { *s = 0.0; }
                         return;
                     }
@@ -258,7 +297,14 @@ impl AudioPlayer {
                     if idx == 0 {
                         if device_sr == file_sr {
                             // ── 1× pass-through, rates match ─────────────────
-                            for s in data.iter_mut() { *s = rx.try_recv().unwrap_or(0.0); }
+                            let mut underran = false;
+                            for s in data.iter_mut() {
+                                match rx.try_recv() {
+                                    Ok(v)  => *s = v,
+                                    Err(_) => { *s = 0.0; underran = true; }
+                                }
+                            }
+                            if underran { underruns += 1; }
                         } else {
                             // ── 1× with sample-rate conversion ───────────────
                             linear.fill(data, &rx);
@@ -268,6 +314,24 @@ impl AudioPlayer {
                         let speed = SPEEDS[idx.min(SPEEDS.len() - 1)]
                             * (file_sr as f32 / device_sr as f32);
                         ola.fill(data, &rx, speed);
+                    }
+
+                    // ── A/V sync logging (verbose, every 5 s) ────────────────
+                    frames_played += (data.len() / ch) as u64;
+                    if frames_played >= next_log_at {
+                        next_log_at += log_interval;
+                        let elapsed_us = frames_played * 1_000_000 / device_sr as u64;
+                        let audio_pts_us = audio_clock_origin + elapsed_us;
+                        let video_pts_us = current_pts_us.load(Ordering::Relaxed);
+                        let drift_ms =
+                            (video_pts_us as i64 - audio_pts_us as i64) / 1_000;
+                        vprintln!(
+                            "A/V sync: audio={:.3}s  video={:.3}s  drift={:+}ms  underruns={underruns}",
+                            audio_pts_us as f64 / 1_000_000.0,
+                            video_pts_us as f64 / 1_000_000.0,
+                            drift_ms,
+                        );
+                        underruns = 0;
                     }
                 },
                 |err| eprintln!("Audio stream error: {err}"),

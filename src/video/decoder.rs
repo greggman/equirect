@@ -20,6 +20,9 @@ pub enum VideoFormat {
     ///               `display_height × stride` when the codec pads height to a
     ///               block boundary (e.g. H.264 pads 1080 → 1088).
     Nv12 { stride: usize, uv_offset: usize },
+    /// Frame is already on GPU (D3D11VP wrote to the shared BGRA texture).
+    /// `data` is empty; the wgpu texture is updated by the decoder thread.
+    GpuReady,
 }
 
 /// A decoded video frame.
@@ -56,6 +59,9 @@ pub struct VideoDecoder {
     pub audio_flush_gen: Arc<AtomicU64>,
     pub width: u32,
     pub height: u32,
+    /// NT handle (as isize) for the D3D11-shared BGRA output texture, or None
+    /// if the GPU path is unavailable.  Import into Vulkan via `VideoTexture::new_gpu`.
+    pub gpu_bgra_handle: Option<isize>,
     /// Set to `true` to signal both decode threads to exit.
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
@@ -76,8 +82,8 @@ impl Drop for VideoDecoder {
 impl VideoDecoder {
     pub fn open(source: String) -> Result<Self> {
 
-        // init message: (width, height, duration_us, is_nv12)
-        let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(u32, u32, u64, bool)>>();
+        // init message: (width, height, duration_us, is_nv12, gpu_bgra_handle_raw)
+        let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(u32, u32, u64, bool, Option<isize>)>>();
         let latest: Arc<Mutex<Option<VideoFrame>>> = Arc::new(Mutex::new(None));
         let latest_clone = Arc::clone(&latest);
         let current_pts_us  = Arc::new(AtomicU64::new(0));
@@ -138,7 +144,7 @@ impl VideoDecoder {
                 )
             })?;
 
-        let (width, height, duration_us, is_nv12) = init_rx
+        let (width, height, duration_us, is_nv12, gpu_bgra_handle) = init_rx
             .recv()
             .map_err(|_| anyhow!("Decoder thread exited before sending init result"))??;
 
@@ -154,6 +160,7 @@ impl VideoDecoder {
                     Arc::clone(&speed_index),
                     Arc::clone(&audio_flush_gen),
                     Arc::clone(&audio_started),
+                    Arc::clone(&current_pts_us),
                 )
             });
 
@@ -172,6 +179,7 @@ impl VideoDecoder {
             audio_flush_gen,
             width,
             height,
+            gpu_bgra_handle,
             stop,
             thread: Some(handle),
             audio_thread: Some(audio_handle),
@@ -191,7 +199,7 @@ impl VideoDecoder {
 #[allow(clippy::too_many_arguments)]
 fn decode_thread(
     source: String,
-    init_tx: std::sync::mpsc::Sender<Result<(u32, u32, u64, bool)>>,
+    init_tx: std::sync::mpsc::Sender<Result<(u32, u32, u64, bool, Option<isize>)>>,
     latest: Arc<Mutex<Option<VideoFrame>>>,
     current_pts_us:  Arc<AtomicU64>,
     paused:          Arc<AtomicBool>,
@@ -236,17 +244,21 @@ fn decode_thread(
 
 // ── D3D11 device manager for hardware-accelerated decode ──────────────────
 
-/// Create a D3D11 device (with video support) and wrap it in an
-/// `IMFDXGIDeviceManager` so the MF source reader can use DXVA2/D3D11VA.
-fn create_dxgi_device_manager()
-    -> Result<windows::Win32::Media::MediaFoundation::IMFDXGIDeviceManager>
-{
+/// Create a D3D11 device (with video support), wrap it in an
+/// `IMFDXGIDeviceManager`, and return all three.  The device and context
+/// are used both by MF for hardware decode and by D3d11VpState for the
+/// GPU NV12→BGRA video-processor pass.
+fn create_d3d11_for_decode() -> Result<(
+    windows::Win32::Media::MediaFoundation::IMFDXGIDeviceManager,
+    windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+)> {
     use windows::Win32::Foundation::HMODULE;
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
     use windows::Win32::Graphics::Direct3D11::{
         D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
         D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, ID3D11Device,
-        ID3D11Multithread,
+        ID3D11DeviceContext, ID3D11Multithread,
     };
     use windows::Win32::Media::MediaFoundation::{
         IMFDXGIDeviceManager, MFCreateDXGIDeviceManager,
@@ -255,6 +267,7 @@ fn create_dxgi_device_manager()
 
     unsafe {
         let mut device: Option<ID3D11Device> = None;
+        let mut context: Option<ID3D11DeviceContext> = None;
         D3D11CreateDevice(
             None,
             D3D_DRIVER_TYPE_HARDWARE,
@@ -264,9 +277,10 @@ fn create_dxgi_device_manager()
             D3D11_SDK_VERSION,
             Some(&mut device),
             None,
-            None,
+            Some(&mut context),
         ).map_err(|e| anyhow!("D3D11CreateDevice: {e}"))?;
-        let device = device.unwrap();
+        let device  = device.unwrap();
+        let context = context.unwrap();
 
         // Required: enable multithreaded protection on the device before
         // passing it to MF, which calls it from its own internal threads.
@@ -283,7 +297,196 @@ fn create_dxgi_device_manager()
         mgr.ResetDevice(&device, reset_token)
             .map_err(|e| anyhow!("IMFDXGIDeviceManager::ResetDevice: {e}"))?;
 
-        Ok(mgr)
+        Ok((mgr, device, context))
+    }
+}
+
+// ── D3D11 video-processor state ────────────────────────────────────────────
+
+/// GPU-side NV12→BGRA converter using the D3D11 Video Processor API.
+///
+/// One of these is created per decode session (after dimensions are known).
+/// `process_frame` is called for every displayed video frame.  It replaces
+/// the CPU `Lock2DSize + memcpy` path with a GPU-only blit (~0.1 ms).
+struct D3d11VpState {
+    video_device:  windows::Win32::Graphics::Direct3D11::ID3D11VideoDevice,
+    video_context: windows::Win32::Graphics::Direct3D11::ID3D11VideoContext,
+    enumerator:    windows::Win32::Graphics::Direct3D11::ID3D11VideoProcessorEnumerator,
+    processor:     windows::Win32::Graphics::Direct3D11::ID3D11VideoProcessor,
+    output_view:   windows::Win32::Graphics::Direct3D11::ID3D11VideoProcessorOutputView,
+    /// Keep the shared BGRA texture alive; its memory is also held by Vulkan.
+    _bgra_tex:     windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+    d3d_context:   windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+}
+
+impl D3d11VpState {
+    /// Set up the video processor and create the shared BGRA output texture.
+    /// Returns the state and the NT HANDLE (as isize) for Vulkan import.
+    fn new(
+        device:  &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        context: &windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+        width: u32,
+        height: u32,
+    ) -> Result<(Self, isize)> {
+        use windows::Win32::Graphics::Direct3D11::*;
+        use windows::Win32::Graphics::Dxgi::*;
+        use windows::Win32::Graphics::Dxgi::Common::*;
+        use windows::core::Interface as _;
+
+        unsafe {
+            // QI for D3D11 video interfaces.
+            let video_device: ID3D11VideoDevice = device.cast()
+                .map_err(|e| anyhow!("ID3D11VideoDevice: {e}"))?;
+            let video_context: ID3D11VideoContext = context.cast()
+                .map_err(|e| anyhow!("ID3D11VideoContext: {e}"))?;
+
+            // Create video processor enumerator for this video size.
+            let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+                InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+                InputFrameRate:  DXGI_RATIONAL { Numerator: 60000, Denominator: 1001 },
+                InputWidth:  width,
+                InputHeight: height,
+                OutputFrameRate: DXGI_RATIONAL { Numerator: 60000, Denominator: 1001 },
+                OutputWidth:  width,
+                OutputHeight: height,
+                Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+            };
+            let enumerator = video_device.CreateVideoProcessorEnumerator(&content_desc)
+                .map_err(|e| anyhow!("CreateVideoProcessorEnumerator: {e}"))?;
+
+            let processor = video_device.CreateVideoProcessor(&enumerator, 0)
+                .map_err(|e| anyhow!("CreateVideoProcessor: {e}"))?;
+
+            // Shared BGRA output texture (D3D11 + Vulkan share via NT handle).
+            let bgra_desc = D3D11_TEXTURE2D_DESC {
+                Width:     width,
+                Height:    height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format:    DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage:     D3D11_USAGE_DEFAULT,
+                BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: (D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0
+                            | D3D11_RESOURCE_MISC_SHARED.0) as u32,
+            };
+            let mut bgra_tex_opt = None;
+            device.CreateTexture2D(&bgra_desc, None, Some(&mut bgra_tex_opt))
+                .map_err(|e| anyhow!("CreateTexture2D (BGRA shared): {e}"))?;
+            let bgra_tex: ID3D11Texture2D = bgra_tex_opt.unwrap();
+
+            // Video processor output view for the BGRA texture.
+            let out_view_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+                ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
+                    Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
+                },
+            };
+            let mut output_view_opt: Option<ID3D11VideoProcessorOutputView> = None;
+            video_device
+                .CreateVideoProcessorOutputView(
+                    &bgra_tex, &enumerator, &out_view_desc,
+                    Some(&mut output_view_opt),
+                )
+                .map_err(|e| anyhow!("CreateVideoProcessorOutputView: {e}"))?;
+            let output_view = output_view_opt.unwrap();
+
+            // Export the BGRA texture as an NT handle for Vulkan to import.
+            let dxgi_res: IDXGIResource1 = bgra_tex.cast()
+                .map_err(|e| anyhow!("IDXGIResource1 cast: {e}"))?;
+            // 0x10000000 = GENERIC_ALL (read + write)
+            let handle = dxgi_res
+                .CreateSharedHandle(None, 0x10000000u32, windows::core::PCWSTR::null())
+                .map_err(|e| anyhow!("CreateSharedHandle: {e}"))?;
+            let handle_raw = handle.0 as isize;
+
+            vprintln!("Video: D3D11VP GPU path enabled ({width}×{height} BGRA shared handle)");
+
+            Ok((Self {
+                video_device,
+                video_context,
+                enumerator,
+                processor,
+                output_view,
+                _bgra_tex: bgra_tex,
+                d3d_context: context.clone(),
+            }, handle_raw))
+        }
+    }
+
+    /// GPU NV12→BGRA blit for the current frame.  Fast path replacing
+    /// the 22 ms `Lock2DSize` CPU copy.
+    fn process_frame(
+        &self,
+        sample: &windows::Win32::Media::MediaFoundation::IMFSample,
+    ) -> Result<()> {
+        use windows::Win32::Graphics::Direct3D11::*;
+        use windows::Win32::Media::MediaFoundation::IMFDXGIBuffer;
+        use windows::core::Interface as _;
+
+        unsafe {
+            let buf = sample.GetBufferByIndex(0)
+                .map_err(|e| anyhow!("GetBufferByIndex (VP): {e}"))?;
+            let dxgi_buf: IMFDXGIBuffer = buf.cast()
+                .map_err(|e| anyhow!("IMFDXGIBuffer cast: {e}"))?;
+            let nv12_tex: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D = {
+                use windows::core::Interface as _;
+                let mut ptr: Option<windows::Win32::Graphics::Direct3D11::ID3D11Texture2D> = None;
+                dxgi_buf.GetResource(
+                    &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D::IID,
+                    &mut ptr as *mut Option<_> as *mut *mut _,
+                ).map_err(|e| anyhow!("IMFDXGIBuffer::GetResource: {e}"))?;
+                ptr.ok_or_else(|| anyhow!("IMFDXGIBuffer::GetResource returned null"))?
+            };
+            let array_slice = dxgi_buf.GetSubresourceIndex()
+                .map_err(|e| anyhow!("GetSubresourceIndex: {e}"))?;
+
+            // Input view for the NV12 decode output surface.
+            let in_view_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+                FourCC: 0, // implied from texture format (NV12)
+                ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
+                    Texture2D: D3D11_TEX2D_VPIV {
+                        MipSlice:   0,
+                        ArraySlice: array_slice,
+                    },
+                },
+            };
+            let mut input_view_opt: Option<ID3D11VideoProcessorInputView> = None;
+            self.video_device
+                .CreateVideoProcessorInputView(
+                    &nv12_tex, &self.enumerator, &in_view_desc,
+                    Some(&mut input_view_opt),
+                )
+                .map_err(|e| anyhow!("CreateVideoProcessorInputView: {e}"))?;
+            let input_view = input_view_opt.unwrap();
+
+            // Blit NV12 → shared BGRA (GPU-only, ~0.1 ms).
+            let stream = D3D11_VIDEO_PROCESSOR_STREAM {
+                Enable: windows::core::BOOL(1),
+                OutputIndex: 0,
+                InputFrameOrField: 0,
+                PastFrames: 0,
+                FutureFrames: 0,
+                ppPastSurfaces:       std::ptr::null_mut(),
+                pInputSurface:        std::mem::ManuallyDrop::new(Some(input_view)),
+                ppFutureSurfaces:     std::ptr::null_mut(),
+                ppPastSurfacesRight:  std::ptr::null_mut(),
+                pInputSurfaceRight:   std::mem::ManuallyDrop::new(None),
+                ppFutureSurfacesRight: std::ptr::null_mut(),
+            };
+            self.video_context.VideoProcessorBlt(
+                &self.processor,
+                &self.output_view,
+                0,
+                &[stream],
+            ).map_err(|e| anyhow!("VideoProcessorBlt: {e}"))?;
+
+            // Flush: submit commands to GPU so Vulkan can read the result.
+            self.d3d_context.Flush();
+        }
+        Ok(())
     }
 }
 
@@ -358,7 +561,7 @@ unsafe fn query_duration_us(
 #[allow(clippy::too_many_arguments)]
 fn open_and_decode(
     source: String,
-    init_tx: std::sync::mpsc::Sender<Result<(u32, u32, u64, bool)>>,
+    init_tx: std::sync::mpsc::Sender<Result<(u32, u32, u64, bool, Option<isize>)>>,
     latest: &Arc<Mutex<Option<VideoFrame>>>,
     current_pts_us:  &Arc<AtomicU64>,
     paused:          &Arc<AtomicBool>,
@@ -403,6 +606,7 @@ fn open_and_decode(
         mf_hw_guid: &windows::core::GUID,
         first_video: u32,
         all_streams: u32,
+        d3d_mgr: Option<&windows::Win32::Media::MediaFoundation::IMFDXGIDeviceManager>,
     ) -> Result<(IMFSourceReader, DecodeFmt, u32, u32, u64)> {
         use windows::Win32::Media::MediaFoundation::*;
         unsafe {
@@ -412,8 +616,8 @@ fn open_and_decode(
             let attrs = attrs.unwrap();
             attrs.SetUINT32(mf_hw_guid, 1).ok();
 
-            if let Ok(mgr) = create_dxgi_device_manager() {
-                attrs.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, &mgr).ok();
+            if let Some(mgr) = d3d_mgr {
+                attrs.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, mgr).ok();
                 vprintln!("Video: D3D11 device manager attached (hardware decode enabled)");
             } else {
                 vprintln!("Video: D3D11 device manager unavailable, falling back to software decode");
@@ -439,7 +643,26 @@ fn open_and_decode(
                 return Err(anyhow!("Video has zero-size dimensions"));
             }
 
-            let fmt = try_set_output_format(&reader, first_video)?;
+            let native_w = (native_frame_size >> 32) as u32;
+            let native_h = (native_frame_size & 0xFFFF_FFFF) as u32;
+
+            // Log the video codec so we can diagnose hardware-decode availability.
+            let video_codec = native_type.GetGUID(&MF_MT_SUBTYPE).ok();
+            let codec_name = video_codec.as_ref().map(|g| {
+                let tag = g.data1;
+                // FourCC is stored in data1 as little-endian bytes.
+                let b = tag.to_le_bytes();
+                if b.iter().all(|&c| c.is_ascii_graphic()) {
+                    format!("{}", std::str::from_utf8(&b).unwrap_or("????"))
+                } else {
+                    format!("{g:?}")
+                }
+            }).unwrap_or_else(|| "unknown".into());
+            let fps_num = native_type.GetUINT64(&MF_MT_FRAME_RATE).unwrap_or(0);
+            let fps = if fps_num >> 32 > 0 { (fps_num >> 32) as f64 / (fps_num & 0xFFFF_FFFF).max(1) as f64 } else { 0.0 };
+            vprintln!("Video native: {native_w}×{native_h}  codec={codec_name}  fps={fps:.3}");
+
+            let fmt = try_set_output_format(&reader, first_video, native_w, native_h)?;
 
             let out_type: IMFMediaType = reader
                 .GetCurrentMediaType(first_video)
@@ -458,17 +681,43 @@ fn open_and_decode(
         }
     }
 
+    // ── D3D11 device + VP setup ───────────────────────────────────────────────
+    let d3d = create_d3d11_for_decode().ok();
+    let d3d_mgr_ref = d3d.as_ref().map(|(mgr, _, _)| mgr);
+
     // ── first open: send init message ────────────────────────────────────────
     let (reader, fmt, width, height, duration_us) =
         match open_reader(url, &source, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
-                          FIRST_VIDEO, ALL_STREAMS) {
+                          FIRST_VIDEO, ALL_STREAMS, d3d_mgr_ref) {
             Ok(r) => r,
             Err(e) => {
                 let _ = init_tx.send(Err(e));
                 return Ok(());
             }
         };
-    let _ = init_tx.send(Ok((width, height, duration_us, fmt == DecodeFmt::Nv12)));
+
+    // Set up GPU NV12→BGRA video processor if D3D11 is available and decode is NV12.
+    let vp = if fmt == DecodeFmt::Nv12 {
+        if let Some((_, ref dev, ref ctx)) = d3d {
+            match D3d11VpState::new(dev, ctx, width, height) {
+                Ok((vp, handle)) => {
+                    let _ = init_tx.send(Ok((width, height, duration_us, false, Some(handle))));
+                    Some(vp)
+                }
+                Err(e) => {
+                    eprintln!("Video: D3D11VP setup failed ({e}), using CPU path");
+                    let _ = init_tx.send(Ok((width, height, duration_us, true, None)));
+                    None
+                }
+            }
+        } else {
+            let _ = init_tx.send(Ok((width, height, duration_us, true, None)));
+            None
+        }
+    } else {
+        let _ = init_tx.send(Ok((width, height, duration_us, fmt == DecodeFmt::Nv12, None)));
+        None
+    };
 
     // The reader is replaced on each loop iteration (reopen instead of seek at EOF).
     let mut reader = reader;
@@ -479,8 +728,16 @@ fn open_and_decode(
     let mut pts_start: i64 = 0;
     let mut decode_one = false; // allow one frame decode even while paused (for seek preview)
     let mut last_speed_index = speed_index.load(Ordering::Relaxed);
+    let mut was_paused = false;
     // When Some(us), decode frames without displaying/pacing until pts_us >= us.
     let mut seek_until_us: Option<u64> = None;
+    // Timestamp of last A/V sync correction seek; prevents rapid re-triggering.
+    let mut last_av_correction: Option<Instant> = None;
+    // Frame timing accumulators (verbose mode).
+    let mut timing_read_ns: u64  = 0;
+    let mut timing_extr_ns: u64  = 0;
+    let mut timing_frames:  u64  = 0;
+    let mut next_timing_log       = 300u64; // log after first 300 frames
     // Consecutive ReadSample calls that returned no frame (stream tick or null sample).
     // MF uses these instead of MF_SOURCE_READERF_ENDOFSTREAM for some sources
     // (SMB network drives, some HTTP servers).  A sustained run signals EOF.
@@ -497,6 +754,9 @@ fn open_and_decode(
         {
             let target = seek_request.lock().unwrap().take();
             if let Some(us) = target {
+                vprintln!("Video: seek_request {:.3}s (seek_until was {:?})",
+                    us as f64 / 1_000_000.0,
+                    seek_until_us.map(|u| format!("{:.3}s", u as f64 / 1_000_000.0)));
                 unsafe { seek_reader_to(&reader, us) };
                 wall_start = None;
                 seek_until_us = Some(us);
@@ -518,9 +778,24 @@ fn open_and_decode(
 
         // ── pause ──────────────────────────────────────────────────────────
         if paused.load(Ordering::Relaxed) && !decode_one {
+            was_paused = true;
             thread::sleep(Duration::from_millis(5));
             continue 'decode;
         }
+
+        // ── unpause: reset pacing ──────────────────────────────────────────
+        // Without this, wall_start lags behind real time by the pause duration
+        // and the video fast-forwards to catch up.
+        // Audio does NOT need a seek/flush here: the audio thread sleeps during
+        // pause and cpal silences without consuming the channel, so the buffer
+        // is still at exactly the right position when we resume.
+        if was_paused && !paused.load(Ordering::Relaxed) {
+            was_paused = false;
+            wall_start = None;
+            audio_started.store(false, Ordering::Release);
+            vprintln!("Video: unpaused — resetting wall clock pacing");
+        }
+
         decode_one = false;
 
         // ── read next sample ───────────────────────────────────────────────
@@ -528,6 +803,7 @@ fn open_and_decode(
         let mut timestamp: i64 = 0;
         let mut sample: Option<IMFSample> = None;
 
+        let t_read0 = Instant::now();
         let read_ok = unsafe {
             reader
                 .ReadSample(
@@ -540,6 +816,7 @@ fn open_and_decode(
                 )
                 .is_ok()
         };
+        let t_read1 = Instant::now();
 
         if !read_ok {
             eprintln!("Video: ReadSample error (flags={flags:#010x})");
@@ -563,7 +840,7 @@ fn open_and_decode(
                 0
             };
             match open_reader(url, &source, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
-                             FIRST_VIDEO, ALL_STREAMS) {
+                             FIRST_VIDEO, ALL_STREAMS, d3d_mgr_ref) {
                 Ok((new_reader, new_fmt, _, _, _)) => {
                     reader = new_reader;
                     fmt    = new_fmt;
@@ -597,7 +874,7 @@ fn open_and_decode(
                     0
                 };
                 match open_reader(url, &source, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
-                                 FIRST_VIDEO, ALL_STREAMS) {
+                                 FIRST_VIDEO, ALL_STREAMS, d3d_mgr_ref) {
                     Ok((new_reader, new_fmt, _, _, _)) => {
                         reader = new_reader;
                         fmt    = new_fmt;
@@ -654,6 +931,9 @@ fn open_and_decode(
             // target due to keyframe alignment.  Sync audio to this exact PTS so
             // it starts from the same frame as video (not from the originally
             // requested position which may differ by up to one GOP).
+            vprintln!("Video: seek landed at {:.3}s (target was {:.3}s) — syncing audio",
+                pts_us as f64 / 1_000_000.0,
+                until as f64 / 1_000_000.0);
             audio_seek.store(pts_us, Ordering::Relaxed);
             audio_flush_gen.fetch_add(1, Ordering::Relaxed);
         }
@@ -673,6 +953,35 @@ fn open_and_decode(
                 // At `speed` = 0.5 we want to take 2× wall time per PTS unit.
                 let target_wall_ns = (pts_elapsed_ns as f64 / speed as f64) as u64;
                 let wall_ns = start.elapsed().as_nanos() as u64;
+
+                // A/V sync correction: when hardware decode is slower than real-time,
+                // video drifts behind the wall clock indefinitely.  Once the gap
+                // exceeds 3 s, seek video forward to catch up.  Only applies at 1×
+                // speed (slow-motion uses the OLA, which has its own timing).
+                // A 15 s cooldown prevents thrashing while the catch-up completes.
+                if speed_index.load(Ordering::Relaxed) == 0 {
+                    let deficit_ns = wall_ns.saturating_sub(target_wall_ns);
+                    let cooldown_ok = last_av_correction
+                        .map_or(true, |t| t.elapsed().as_secs() >= 15);
+                    if cooldown_ok && deficit_ns > 3_000_000_000 {
+                        let sync_us = pts_us + deficit_ns / 1_000;
+                        eprintln!(
+                            "Video: A/V sync correction — {:.1}s behind real-time, \
+                             seeking to {:.3}s",
+                            deficit_ns as f64 / 1_000_000_000.0,
+                            sync_us as f64 / 1_000_000.0,
+                        );
+                        unsafe { seek_reader_to(&reader, sync_us) };
+                        wall_start = None;
+                        seek_until_us = Some(sync_us);
+                        audio_seek.store(sync_us, Ordering::Relaxed);
+                        audio_flush_gen.fetch_add(1, Ordering::Relaxed);
+                        audio_started.store(false, Ordering::Release);
+                        last_av_correction = Some(Instant::now());
+                        continue 'decode;
+                    }
+                }
+
                 if target_wall_ns > wall_ns + 1_000_000 {
                     thread::sleep(Duration::from_nanos(target_wall_ns - wall_ns - 500_000));
                 }
@@ -680,13 +989,22 @@ fn open_and_decode(
         }
 
         // ── frame extraction ──────────────────────────────────────────────
-        // NV12: copy raw Y+UV planes; GPU shader handles YCbCr → RGB.
+        // GPU path: D3D11VP blits NV12→BGRA into the shared texture (~0.1 ms).
+        // CPU path: copy raw Y+UV planes; GPU shader handles YCbCr → RGB.
         // BGRA/YUY2: CPU converts to BGRA (only reached on HW-decode fallback).
+        let t_extr0 = Instant::now();
         let frame = match fmt {
             DecodeFmt::Nv12 => {
-                match extract_nv12_raw(&sample, height as usize) {
-                    Ok(f) => f,
-                    Err(e) => return Err(e),
+                if let Some(ref vp) = vp {
+                    match vp.process_frame(&sample) {
+                        Ok(()) => VideoFrame { data: vec![], format: VideoFormat::GpuReady },
+                        Err(e) => return Err(e),
+                    }
+                } else {
+                    match extract_nv12_raw(&sample, height as usize) {
+                        Ok(f) => f,
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             DecodeFmt::Bgra => {
@@ -701,6 +1019,24 @@ fn open_and_decode(
                 VideoFrame { data, format: VideoFormat::Bgra }
             }
         };
+        let t_extr1 = Instant::now();
+
+        // Accumulate frame timing; log periodically in verbose mode.
+        timing_read_ns  += t_read1.duration_since(t_read0).as_nanos() as u64;
+        timing_extr_ns  += t_extr1.duration_since(t_extr0).as_nanos() as u64;
+        timing_frames   += 1;
+        if timing_frames >= next_timing_log {
+            next_timing_log += 300;
+            let avg_read = timing_read_ns / timing_frames;
+            let avg_extr = timing_extr_ns / timing_frames;
+            vprintln!(
+                "Video timing ({timing_frames} frames): \
+                 ReadSample avg={:.1}ms  extract avg={:.1}ms  total avg={:.1}ms",
+                avg_read as f64 / 1_000_000.0,
+                avg_extr as f64 / 1_000_000.0,
+                (avg_read + avg_extr) as f64 / 1_000_000.0,
+            );
+        }
 
         *latest.lock().unwrap() = Some(frame);
     }
@@ -711,6 +1047,8 @@ fn open_and_decode(
 fn try_set_output_format(
     reader: &windows::Win32::Media::MediaFoundation::IMFSourceReader,
     stream: u32,
+    _native_w: u32,
+    _native_h: u32,
 ) -> Result<DecodeFmt> {
     use windows::Win32::Media::MediaFoundation::*;
 
@@ -924,7 +1262,7 @@ fn open_and_decode_audio(
     source: String,
     format_tx: &std::sync::mpsc::Sender<Option<(u32, u16)>>,
     producer: &std::sync::mpsc::SyncSender<f32>,
-    _paused: &Arc<AtomicBool>,
+    paused: &Arc<AtomicBool>,
     _speed_index: &Arc<AtomicU32>,
     audio_seek: &Arc<AtomicU64>,
     _audio_flush_gen: &Arc<AtomicU64>,
@@ -959,7 +1297,18 @@ fn open_and_decode_audio(
         }
     }
 
-
+    // Read the codec's native format before requesting PCM conversion.
+    // We need native_sr to detect HE-AAC SBR (output_sr = 2 × native_sr).
+    let native_sr: u32 = unsafe {
+        reader.GetNativeMediaType(FIRST_AUDIO, 0).ok().map_or(0, |native| {
+            let sr    = native.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND).unwrap_or(0);
+            let ch    = native.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS).unwrap_or(0);
+            let bits  = native.GetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE).unwrap_or(0);
+            let sub   = native.GetGUID(&MF_MT_SUBTYPE).ok();
+            vprintln!("Audio native: {sr} Hz  {ch} ch  {bits}-bit  subtype={sub:?}");
+            sr
+        })
+    };
 
     // Request 32-bit float PCM output.
     let format_ok = unsafe {
@@ -982,15 +1331,59 @@ fn open_and_decode_audio(
         let cur = reader
             .GetCurrentMediaType(FIRST_AUDIO)
             .map_err(|e| anyhow!("GetCurrentMediaType (audio): {e}"))?;
-        let sr = cur.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND).unwrap_or(48_000);
-        let ch = cur.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS).unwrap_or(2) as u16;
+        let sr          = cur.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND).unwrap_or(48_000);
+        let ch          = cur.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS).unwrap_or(2) as u16;
+        let bits        = cur.GetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE).unwrap_or(0);
+        let block_align = cur.GetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT).unwrap_or(0);
+        let avg_bps     = cur.GetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND).unwrap_or(0);
+        vprintln!(
+            "Audio: {sr} Hz  {ch} ch  {bits}-bit  block_align={block_align} B/frame  avg={avg_bps} B/s"
+        );
+        // For float32 PCM: expected block alignment = channels × 4 bytes.
+        let expected_block = ch as u32 * 4;
+        if bits != 32 {
+            eprintln!("Audio WARNING: expected 32-bit float but MF reports {bits}-bit — samples will be misinterpreted");
+        }
+        if block_align != expected_block {
+            eprintln!(
+                "Audio WARNING: block_align={block_align} but expected {expected_block} \
+                 ({ch} ch × 4 bytes) — byte count per frame is wrong"
+            );
+        }
         (sr, ch)
     };
-    let _ = format_tx.send(Some((sample_rate, channels)));
 
+    // HE-AAC with Spectral Band Replication (SBR) reports output_sr = 2 × native_sr.
+    // MF's decoder delivers frames at the *native* rate (e.g. 1024 frames per AAC
+    // frame at 24 kHz) rather than the expected upsampled count (2048 at 48 kHz).
+    // Playing those frames at the reported 48 kHz produces exactly 2× speed / one
+    // octave of pitch shift.  Fix: use native_sr so the cpal resampler compensates.
+    let effective_sr = if native_sr > 0 && sample_rate == 2 * native_sr {
+        vprintln!(
+            "Audio: HE-AAC SBR detected (native {native_sr} Hz → reported {sample_rate} Hz) \
+             — using {native_sr} Hz for playback"
+        );
+        native_sr
+    } else {
+        sample_rate
+    };
+    let _ = format_tx.send(Some((effective_sr, channels)));
+
+    let mut first_sample_logged  = false;
+    let mut total_frames_sent: u64 = 0;
+    let mut next_timing_check: u64 = 5 * effective_sr as u64;
+    let mut seek_ts_us: u64 = 0; // PTS at the time of last seek/reset, for relative ratio
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
+        }
+
+        // Don't advance the audio stream while paused.  Without this the
+        // decode thread races through the file and the audio channel fills
+        // with audio that is seconds ahead of the current video position.
+        if paused.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(10));
+            continue;
         }
 
         // Handle seek request from the main thread.
@@ -1000,8 +1393,14 @@ fn open_and_decode_audio(
                 .compare_exchange(seek_us, NO_SEEK, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
         {
+            vprintln!("Audio: seeking to {:.3}s", seek_us as f64 / 1_000_000.0);
             unsafe { seek_reader_to(&reader, seek_us) };
-            // flush_gen was already bumped by app.rs; cpal callback will drain stale samples.
+            // flush_gen was already bumped by the video thread; the cpal callback will
+            // drain stale samples and reset the A/V sync counters.
+            total_frames_sent = 0;
+            next_timing_check = 5 * effective_sr as u64;
+            seek_ts_us = seek_us;
+            first_sample_logged = false;
         }
 
         // Throttle: if the channel is full, wait for the consumer to catch up.
@@ -1042,11 +1441,62 @@ fn open_and_decode_audio(
         let Some(sample) = sample else { continue };
 
         let bytes = lock_contiguous(&sample)?;
+
+        // On the first sample: log how many bytes MF delivered and whether
+        // they look like a valid float32 buffer.  This catches format
+        // mismatches (e.g. MF delivering 16-bit PCM would produce a byte
+        // count that is not divisible by channels×4).
+        if !first_sample_logged {
+            first_sample_logged = true;
+            let frame_bytes = channels as usize * 4; // float32 interleaved
+            let frames = bytes.len() / frame_bytes;
+            let remainder = bytes.len() % frame_bytes;
+            vprintln!(
+                "Audio: first MF sample = {} bytes → {} frames ({} ch × 4 B) \
+                 remainder={remainder}{}",
+                bytes.len(), frames, channels,
+                if remainder != 0 { " ← MISMATCH" } else { "" },
+            );
+            let ts_us = (timestamp / 10) as u64;
+            vprintln!("Audio: first sample timestamp = {:.3}s", ts_us as f64 / 1_000_000.0);
+        }
+
         // Interpret raw bytes as little-endian f32 PCM.
         let floats: Vec<f32> = bytes
             .chunks_exact(4)
             .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect();
+
+        // Check how many frames we've pushed vs how far the PTS has advanced.
+        // If ratio >> 1.0, MF is delivering more samples than the timestamp
+        // implies — a codec/container rate mismatch — and audio will play fast.
+        let frames_here = floats.len() / channels as usize;
+        total_frames_sent += frames_here as u64;
+        if total_frames_sent >= next_timing_check {
+            next_timing_check += 5 * effective_sr as u64;
+            let ts_us = (timestamp / 10) as u64;
+            let elapsed_us = ts_us.saturating_sub(seek_ts_us);
+            if elapsed_us > 0 {
+                let expected = elapsed_us * effective_sr as u64 / 1_000_000;
+                let ratio    = total_frames_sent as f64 / expected as f64;
+                vprintln!(
+                    "Audio timing: {total_frames_sent} frames sent  ts={:.1}s (+{:.1}s from seek)  ratio={ratio:.3}{}",
+                    ts_us as f64 / 1_000_000.0,
+                    elapsed_us as f64 / 1_000_000.0,
+                    if (ratio - 1.0).abs() > 0.1 { "  ← MISMATCH" } else { "" },
+                );
+            }
+        }
+        // Warn if MF changes the frame size after a seek (SBR may toggle on/off).
+        if first_sample_logged {
+            let expected_frame_bytes = channels as usize * 4;
+            let expected_1x = 1024 * expected_frame_bytes; // native AAC frame
+            let expected_2x = 2048 * expected_frame_bytes; // SBR-upsampled
+            if bytes.len() != expected_1x && bytes.len() != expected_2x {
+                eprintln!("Audio WARNING: unexpected frame size {} bytes ({} frames)",
+                    bytes.len(), bytes.len() / expected_frame_bytes);
+            }
+        }
 
         // Push all floats into the channel, yielding when it is full.
         for &sample in floats.iter() {

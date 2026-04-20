@@ -160,13 +160,44 @@ fn single_instance(arg: Option<&str>) -> Option<std::sync::mpsc::Receiver<String
     }
 }
 
+/// Parse a timestamp string like "14:52", "1:14:52", or plain seconds "892"
+/// into a number of seconds.  Returns `None` if the format is unrecognised.
+fn parse_timestamp(s: &str) -> Option<f64> {
+    let parts: Vec<&str> = s.split(':').collect();
+    match parts.as_slice() {
+        [secs]        => secs.parse::<f64>().ok(),
+        [mins, secs]  => {
+            let m = mins.parse::<u64>().ok()?;
+            let s = secs.parse::<f64>().ok()?;
+            Some(m as f64 * 60.0 + s)
+        }
+        [hrs, mins, secs] => {
+            let h = hrs.parse::<u64>().ok()?;
+            let m = mins.parse::<u64>().ok()?;
+            let s = secs.parse::<f64>().ok()?;
+            Some(h as f64 * 3600.0 + m as f64 * 60.0 + s)
+        }
+        _ => None,
+    }
+}
+
 fn main() {
-    // Parse args: strip -v/--verbose flags; first remaining arg is a path or URL.
+    // Parse args: strip -v/--verbose and --start/-t flags; first remaining arg is a path or URL.
     let mut verbose = false;
     let mut first_arg: Option<String> = None;
-    for arg in std::env::args().skip(1) {
+    let mut start_secs: Option<f64> = None;
+    let mut args = std::env::args().skip(1).peekable();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "-v" | "--verbose" => verbose = true,
+            "-t" | "--start" => {
+                if let Some(val) = args.next() {
+                    start_secs = parse_timestamp(&val);
+                    if start_secs.is_none() {
+                        eprintln!("Warning: could not parse timestamp {:?} (expected MM:SS, HH:MM:SS, or seconds)", val);
+                    }
+                }
+            }
             _ if first_arg.is_none() => first_arg = Some(arg),
             _ => {}
         }
@@ -218,6 +249,6 @@ fn main() {
     let event_loop = winit::event_loop::EventLoop::new().expect("Failed to create event loop");
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
-    let mut app = app::App::new(video_source, initial_browser_dir, ipc_rx);
+    let mut app = app::App::new(video_source, initial_browser_dir, ipc_rx, start_secs);
     event_loop.run_app(&mut app).expect("Event loop failed");
 }

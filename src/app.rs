@@ -176,6 +176,8 @@ pub struct App {
     ipc_rx: std::sync::mpsc::Receiver<String>,
     /// Pending IPC-requested video source, queued until VR is ready.
     pending_ipc_source: Option<String>,
+    /// If set, seek to this position (seconds) once the first video opens.
+    initial_start_secs: Option<f64>,
 }
 
 
@@ -184,6 +186,7 @@ impl App {
         video_source: Option<String>,
         initial_browser_dir: Option<PathBuf>,
         ipc_rx: std::sync::mpsc::Receiver<String>,
+        initial_start_secs: Option<f64>,
     ) -> Self {
         let panel_mode = if video_source.is_none() && initial_browser_dir.is_some() {
             PanelMode::Browser
@@ -212,6 +215,7 @@ impl App {
             seek_timeout: None,
             ipc_rx,
             pending_ipc_source: None,
+            initial_start_secs,
         }
     }
 }
@@ -299,9 +303,14 @@ impl ApplicationHandler for App {
                 }
                 Ok(decoder) => {
                     self.control_bar_state.error = None;
-                    let tex = VideoTexture::new(
-                        &renderer.device, decoder.width, decoder.height, decoder.is_nv12,
-                    );
+                    let tex = decoder.gpu_bgra_handle
+                        .and_then(|h| VideoTexture::new_gpu(
+                            &renderer.device, &renderer.instance, &renderer.adapter,
+                            decoder.width, decoder.height, h,
+                        ))
+                        .unwrap_or_else(|| VideoTexture::new(
+                            &renderer.device, decoder.width, decoder.height, decoder.is_nv12,
+                        ));
                     let vr_rend = VideoRenderer::new(
                         &renderer.device, target_fmt,
                         decoder.width, decoder.height,
@@ -313,6 +322,16 @@ impl ApplicationHandler for App {
                     if decoder.duration_us > 0 {
                         self.control_bar_state.duration_secs =
                             decoder.duration_us as f64 / 1_000_000.0;
+                    }
+                    // --start / -t: seek to the requested position on first open.
+                    if let Some(secs) = self.initial_start_secs.take() {
+                        let target_us = (secs * 1_000_000.0) as u64;
+                        *decoder.seek_request.lock().unwrap() = Some(target_us);
+                        self.control_bar_state.current_secs = secs;
+                        self.seek_target_secs = Some(secs);
+                        self.seek_timeout = Some(
+                            std::time::Instant::now() + std::time::Duration::from_secs(30),
+                        );
                     }
                     self.video_decoder   = Some(decoder);
                     self.video_texture   = Some(tex);
@@ -588,9 +607,14 @@ impl ApplicationHandler for App {
                     }
                     Ok(decoder) => {
                         self.control_bar_state.error = None;
-                        let tex = VideoTexture::new(
-                            &renderer.device, decoder.width, decoder.height, decoder.is_nv12,
-                        );
+                        let tex = decoder.gpu_bgra_handle
+                            .and_then(|h| VideoTexture::new_gpu(
+                                &renderer.device, &renderer.instance, &renderer.adapter,
+                                decoder.width, decoder.height, h,
+                            ))
+                            .unwrap_or_else(|| VideoTexture::new(
+                                &renderer.device, decoder.width, decoder.height, decoder.is_nv12,
+                            ));
                         let vr_rend = VideoRenderer::new(
                             &renderer.device, target_fmt,
                             decoder.width, decoder.height,
@@ -740,9 +764,14 @@ impl ApplicationHandler for App {
                         }
                         Ok(decoder) => {
                             self.control_bar_state.error = None;
-                            let tex = VideoTexture::new(
-                                &renderer.device, decoder.width, decoder.height, decoder.is_nv12,
-                            );
+                            let tex = decoder.gpu_bgra_handle
+                                .and_then(|h| VideoTexture::new_gpu(
+                                    &renderer.device, &renderer.instance, &renderer.adapter,
+                                    decoder.width, decoder.height, h,
+                                ))
+                                .unwrap_or_else(|| VideoTexture::new(
+                                    &renderer.device, decoder.width, decoder.height, decoder.is_nv12,
+                                ));
                             let vr_rend = VideoRenderer::new(
                                 &renderer.device, target_fmt,
                                 decoder.width, decoder.height,
