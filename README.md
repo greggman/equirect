@@ -116,6 +116,20 @@ You can also pass an network URL like `http://<local-ip-address>/path/somevideo.
 You can run a server like [servez](https://github.com/greggman/servez) or
 nginx etc and to should let you access your videos.
 
+* `-v` or `--verbose`
+
+  Verbose output
+
+* `-t time` or `--start time`
+
+  Starts the given video at a specific time
+
+  ```
+  -t 12:34     # start at 12 minutes 34 seconds
+  -t 12:34:56  # start at 12 hours 34 minutes 56 seconds
+  -t 123       # start at 123 seconds in same as (2:03)
+  ```
+
 ## Development
 
 To re-generate the icon texture atlas and the logo
