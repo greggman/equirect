@@ -72,10 +72,14 @@ pub struct VideoDecoder {
 impl Drop for VideoDecoder {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        // Unblock the audio channel if the audio thread is sleeping on a full send.
-        // (The video thread checks stop at the top of every loop iteration.)
-        if let Some(h) = self.thread.take()       { let _ = h.join(); }
-        if let Some(h) = self.audio_thread.take() { let _ = h.join(); }
+        // Detach threads rather than joining: ReadSample() and MFShutdown() can
+        // block for hundreds of ms (or indefinitely on some drivers), which would
+        // freeze the window during close.  Both threads hold their own Arc refs to
+        // all shared state so they continue running safely until they next check
+        // `stop`.  The audio thread exits when `_audio_player` (and thus audio_rx)
+        // drops below, causing its channel send to return Disconnected.
+        drop(self.thread.take());
+        drop(self.audio_thread.take());
     }
 }
 
