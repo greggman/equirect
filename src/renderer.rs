@@ -276,11 +276,21 @@ impl Renderer {
     /// Returns `false` when the surface is lost/outdated and needs to be
     /// reconfigured.
     pub fn render(&self) -> bool {
+        self.render_with(|view, _w, _h| self.draw_logo(view))
+    }
+
+    /// Acquire the swapchain image, hand its view (and current dimensions) to
+    /// `draw`, then present.  Used by local mode to render the scene directly
+    /// to the desktop window.
+    pub fn render_with<F>(&self, draw: F) -> bool
+    where
+        F: FnOnce(&wgpu::TextureView, u32, u32),
+    {
         match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(output)
             | wgpu::CurrentSurfaceTexture::Suboptimal(output) => {
                 let view = output.texture.create_view(&Default::default());
-                self.draw_logo(&view);
+                draw(&view, self.config.width, self.config.height);
                 output.present();
                 true
             }

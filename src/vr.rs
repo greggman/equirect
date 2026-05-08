@@ -961,3 +961,35 @@ impl VrContext {
         (cb_actions, browser_actions, settings_actions)
     }
 }
+
+impl crate::mode::Mode for VrContext {
+    fn target_format(&self) -> wgpu::TextureFormat { self.swapchain_format }
+    fn supports_video_layer(&self) -> bool { true }
+    fn supports_equirect2(&self) -> bool { self.has_equirect2 }
+    fn should_quit(&self) -> bool { self.should_quit }
+    fn request_exit(&self) { VrContext::request_exit(self); }
+
+    fn create_video_swapchain(
+        &self,
+        device: &wgpu::Device,
+        width:  u32,
+        height: u32,
+    ) -> Option<VideoSwapchain> {
+        VrContext::create_video_swapchain(self, device, width, height)
+    }
+
+    fn render_frame(
+        &mut self,
+        renderer:         &Renderer,
+        video_layer:      Option<(&mut VideoSwapchain, &VideoSettings)>,
+        video_shader:     Option<(&VideoRenderer, &VideoTexture, &VideoSettings)>,
+        panel:            Option<(&mut PanelRenderer, &ControlBarState)>,
+        browser:          Option<(&mut PanelRenderer, &mut BrowserState)>,
+        settings:         Option<(&mut PanelRenderer, &mut VideoSettings)>,
+        pointer_renderer: Option<&PointerRenderer>,
+    ) -> (ControlBarActions, BrowserActions, SettingsActions) {
+        VrContext::render_frame(
+            self, renderer, video_layer, video_shader, panel, browser, settings, pointer_renderer,
+        )
+    }
+}

@@ -135,6 +135,8 @@ enum PanelMode {
     Settings,
     Hidden,
 }
+use crate::local::LocalMode;
+use crate::mode::Mode;
 use crate::ui::control_bar::{ControlBarState, SPEEDS};
 use crate::ui::panel::PanelRenderer;
 use crate::video::decoder::VideoDecoder;
@@ -143,9 +145,11 @@ use crate::video_renderer::VideoRenderer;
 use crate::vr::{VrContext, VrPreInit};
 
 pub struct App {
-    // Drop order matters: vr before renderer so the XR session is destroyed
+    // Drop order matters: mode before renderer so any XR session is destroyed
     // while the wgpu Vulkan device is still alive.
-    vr: Option<VrContext>,
+    mode: Option<Box<dyn Mode>>,
+    /// True if `--local` was passed on the command line — skip VR setup entirely.
+    local_mode: bool,
     renderer: Option<Renderer>,
     video_decoder: Option<VideoDecoder>,
     video_texture: Option<VideoTexture>,
@@ -187,6 +191,7 @@ impl App {
         initial_browser_dir: Option<PathBuf>,
         ipc_rx: std::sync::mpsc::Receiver<String>,
         initial_start_secs: Option<f64>,
+        local_mode: bool,
     ) -> Self {
         let panel_mode = if video_source.is_none() && initial_browser_dir.is_some() {
             PanelMode::Browser
@@ -194,7 +199,8 @@ impl App {
             PanelMode::ControlBar
         };
         Self {
-            vr: None,
+            mode: None,
+            local_mode,
             renderer: None,
             video_decoder: None,
             video_texture: None,
@@ -277,19 +283,26 @@ impl ApplicationHandler for App {
             }
         }
 
-        let vr_pre = VrPreInit::new();
+        // VR setup is skipped entirely in --local mode so the app can run
+        // without an OpenXR runtime or headset.
+        let vr_pre = if self.local_mode { None } else { VrPreInit::new() };
         let xr_exts = vr_pre.as_ref().map(|v| v.required_device_extensions()).unwrap_or_default();
 
         let mut renderer = Renderer::new(window, &xr_exts);
 
-        let vr = vr_pre.and_then(|pre| VrContext::new(&renderer, pre));
-        if let Some(ref vr) = vr {
-            renderer.prepare_for_xr(vr.swapchain_format);
-        }
+        let mode: Option<Box<dyn Mode>> = if self.local_mode {
+            Some(Box::new(LocalMode::new(&renderer)))
+        } else {
+            let vr = vr_pre.and_then(|pre| VrContext::new(&renderer, pre));
+            if let Some(ref vr) = vr {
+                renderer.prepare_for_xr(vr.swapchain_format);
+            }
+            vr.map(|v| Box::new(v) as Box<dyn Mode>)
+        };
 
-        let target_fmt = vr
+        let target_fmt = mode
             .as_ref()
-            .map(|v| v.swapchain_format)
+            .map(|m| m.target_format())
             .unwrap_or_else(|| renderer.surface_format());
 
         if let Some(ref source) = self.video_source {
@@ -315,8 +328,8 @@ impl ApplicationHandler for App {
                         &renderer.device, target_fmt,
                         decoder.width, decoder.height,
                     );
-                    let sc = vr.as_ref().and_then(|vr| {
-                        vr.create_video_swapchain(&renderer.device, decoder.width, decoder.height)
+                    let sc = mode.as_ref().and_then(|m| {
+                        m.create_video_swapchain(&renderer.device, decoder.width, decoder.height)
                     });
                     self.control_bar_state.video_name = source_display_name(source);
                     if decoder.duration_us > 0 {
@@ -341,10 +354,13 @@ impl ApplicationHandler for App {
             }
         }
 
+        let cb_pos      = mode.as_ref().map(|m| m.control_bar_position()).unwrap_or(glam::Vec3::new(0.0, 0.0, -2.0));
+        let browser_pos = mode.as_ref().map(|m| m.browser_position()).unwrap_or(glam::Vec3::new(0.0, 1.2, -2.0));
+
         self.panel_renderer = Some(PanelRenderer::new(
             &renderer.device, target_fmt,
             720, 160,
-            glam::Vec3::new(0.0, 0.0, -2.0),
+            cb_pos,
             1.8, 0.4,
         ));
 
@@ -358,16 +374,21 @@ impl ApplicationHandler for App {
             self.browser_panel = Some(PanelRenderer::new(
                 &renderer.device, target_fmt,
                 800, 600,
-                glam::Vec3::new(0.0, 1.2, -2.0),
+                browser_pos,
                 1.6, 1.2,
             ));
         }
 
         self.renderer = Some(renderer);
-        self.vr = vr;
+        self.mode = mode;
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // Forward every event to the active mode (LocalMode uses these for
+        // mouse/keyboard input; VrContext ignores them).
+        if let Some(m) = &mut self.mode {
+            m.handle_window_event(&event);
+        }
         match event {
             WindowEvent::CloseRequested => { event_loop.exit(); }
             WindowEvent::Resized(size) => {
@@ -375,9 +396,15 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 let Some(r) = &mut self.renderer else { return };
-                if !r.render() {
-                    let size = r.window().inner_size();
-                    r.resize(size);
+                // In modes that render directly to the window (LocalMode), the
+                // surface is drawn from `about_to_wait` — don't double-render
+                // the logo on top.
+                let renders_to_window = self.mode.as_ref().map_or(false, |m| m.renders_to_window());
+                if !renders_to_window {
+                    if !r.render() {
+                        let size = r.window().inner_size();
+                        r.resize(size);
+                    }
                 }
                 r.window().request_redraw();
             }
@@ -430,18 +457,23 @@ impl ApplicationHandler for App {
             }
         }
 
-        if let Some(vr) = &mut self.vr {
-            if vr.should_quit {
+        if let Some(mode) = &mut self.mode {
+            if mode.exit_requested() {
+                event_loop.exit();
+                return;
+            }
+            if mode.should_quit() {
                 renderer
                     .device
                     .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
                     .ok();
                 self.video_swapchain = None;
-                self.vr = None;
+                self.mode = None;
                 return;
             }
 
-            let use_layer = use_xr_layer(&self.video_settings, vr.has_equirect2);
+            let use_layer = mode.supports_video_layer()
+                && use_xr_layer(&self.video_settings, mode.supports_equirect2());
             let video_settings_snap = self.video_settings.clone();
             let video_layer_arg =
                 if use_layer { self.video_swapchain.as_mut().map(|sc| (sc, &video_settings_snap)) }
@@ -468,7 +500,7 @@ impl ApplicationHandler for App {
                 if self.panel_mode != PanelMode::Hidden { self.pointer_renderer.as_ref() }
                 else { None };
 
-            let (actions, browser_actions, settings_actions) = vr.render_frame(
+            let (actions, browser_actions, settings_actions) = mode.render_frame(
                 renderer,
                 video_layer_arg,
                 video_shader_arg,
@@ -559,9 +591,9 @@ impl ApplicationHandler for App {
                     self.browser_state = Some(BrowserState::new(loc, current_loc, cached));
                     if self.browser_panel.is_none() {
                         self.browser_panel = Some(PanelRenderer::new(
-                            &renderer.device, vr.swapchain_format,
+                            &renderer.device, mode.target_format(),
                             800, 600,
-                            glam::Vec3::new(0.0, 1.2, -2.0),
+                            mode.browser_position(),
                             1.6, 1.2,
                         ));
                     }
@@ -584,7 +616,7 @@ impl ApplicationHandler for App {
             };
 
             if let Some(new_source) = play_source {
-                let target_fmt = vr.swapchain_format;
+                let target_fmt = mode.target_format();
 
                 self.video_settings = load_meta(&new_source)
                     .map(|m| m.settings)
@@ -619,7 +651,7 @@ impl ApplicationHandler for App {
                             &renderer.device, target_fmt,
                             decoder.width, decoder.height,
                         );
-                        let sc = vr.create_video_swapchain(
+                        let sc = mode.create_video_swapchain(
                             &renderer.device, decoder.width, decoder.height,
                         );
                         self.control_bar_state.video_name = source_display_name(&new_source);
@@ -744,7 +776,7 @@ impl ApplicationHandler for App {
                     .and_then(|s| adjacent_video(s, &mut self.folder_cache, delta));
 
                 if let Some(new_source) = next {
-                    let target_fmt = vr.swapchain_format;
+                    let target_fmt = mode.target_format();
                     self.video_settings = load_meta(&new_source)
                         .map(|m| m.settings)
                         .unwrap_or_else(|| {
@@ -776,7 +808,7 @@ impl ApplicationHandler for App {
                                 &renderer.device, target_fmt,
                                 decoder.width, decoder.height,
                             );
-                            let sc = vr.create_video_swapchain(
+                            let sc = mode.create_video_swapchain(
                                 &renderer.device, decoder.width, decoder.height,
                             );
                             self.control_bar_state.video_name = source_display_name(&new_source);
@@ -798,9 +830,9 @@ impl ApplicationHandler for App {
             if actions.show_settings && self.panel_mode != PanelMode::Settings {
                 if self.settings_panel.is_none() {
                     self.settings_panel = Some(PanelRenderer::new(
-                        &renderer.device, vr.swapchain_format,
+                        &renderer.device, mode.target_format(),
                         800, 600,
-                        glam::Vec3::new(0.0, 1.2, -2.0),
+                        mode.settings_position(),
                         1.6, 1.0,
                     ));
                 }
@@ -826,9 +858,9 @@ impl ApplicationHandler for App {
                     let cached = self.folder_cache.get(&cache_key(&start_loc)).cloned();
                     self.browser_state = Some(BrowserState::new(start_loc, current_loc, cached));
                     self.browser_panel = Some(PanelRenderer::new(
-                        &renderer.device, vr.swapchain_format,
+                        &renderer.device, mode.target_format(),
                         800, 600,
-                        glam::Vec3::new(0.0, 1.2, -2.0),
+                        mode.browser_position(),
                         1.6, 1.2,
                     ));
                 }
@@ -845,7 +877,7 @@ impl ApplicationHandler for App {
             }
 
             if actions.exit {
-                vr.request_exit();
+                mode.request_exit();
                 event_loop.exit();
             }
         }

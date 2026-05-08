@@ -1,7 +1,9 @@
 mod app;
 mod audio;
 mod input;
+mod local;
 mod logo;
+mod mode;
 mod net;
 mod pointer_renderer;
 mod renderer;
@@ -182,14 +184,17 @@ fn parse_timestamp(s: &str) -> Option<f64> {
 }
 
 fn main() {
-    // Parse args: strip -v/--verbose and --start/-t flags; first remaining arg is a path or URL.
+    // Parse args: strip -v/--verbose, --local, and --start/-t flags; first
+    // remaining arg is a path or URL.
     let mut verbose = false;
+    let mut local_mode = false;
     let mut first_arg: Option<String> = None;
     let mut start_secs: Option<f64> = None;
     let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-v" | "--verbose" => verbose = true,
+            "--local"          => local_mode = true,
             "-t" | "--start" => {
                 if let Some(val) = args.next() {
                     start_secs = parse_timestamp(&val);
@@ -249,6 +254,6 @@ fn main() {
     let event_loop = winit::event_loop::EventLoop::new().expect("Failed to create event loop");
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
-    let mut app = app::App::new(video_source, initial_browser_dir, ipc_rx, start_secs);
+    let mut app = app::App::new(video_source, initial_browser_dir, ipc_rx, start_secs, local_mode);
     event_loop.run_app(&mut app).expect("Event loop failed");
 }
