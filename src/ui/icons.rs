@@ -3,137 +3,51 @@
 include!(concat!(env!("OUT_DIR"), "/icons_data.rs"));
 
 /// The icons sprite-sheet embedded at compile time.
-/// Cargo automatically re-compiles when this file changes.
 const ICONS_PNG_BYTES: &[u8] = include_bytes!("../../resources/icons.png");
 
-// ── Texture loading ───────────────────────────────────────────────────────────
-
-/// Return the icon sprite-sheet as an egui `TextureHandle`.
-///
-/// The texture is decoded and uploaded to egui on the first call; every
-/// subsequent call returns the cached handle from egui's memory so there is
-/// no per-frame cost.
-pub fn get_texture(ctx: &egui::Context) -> egui::TextureHandle {
-    let cache_id = egui::Id::new("__icons_sprite_sheet__");
-
-    // Fast path: already cached.
-    if let Some(handle) = ctx.data_mut(|d| d.get_temp::<egui::TextureHandle>(cache_id)) {
-        return handle;
-    }
-
-    // Decode the embedded PNG.
+/// Decode the embedded sprite sheet to RGBA8.  Used when uploading the texture.
+pub fn decode_sheet() -> (u32, u32, Vec<u8>) {
     let decoder = png::Decoder::new(std::io::Cursor::new(ICONS_PNG_BYTES));
     let mut reader = decoder.read_info().expect("icons.png: failed to read PNG info");
     let mut buf = vec![0u8; reader.output_buffer_size()];
-    let info = reader
-        .next_frame(&mut buf)
-        .expect("icons.png: failed to decode frame");
-
-    let raw = &buf[..info.buffer_size()];
-
-    // Normalise to RGBA8.
+    let info = reader.next_frame(&mut buf).expect("icons.png: failed to decode frame");
+    let raw  = &buf[..info.buffer_size()];
     let rgba: Vec<u8> = match info.color_type {
         png::ColorType::Rgba => raw.to_vec(),
-        png::ColorType::Rgb => raw
-            .chunks_exact(3)
-            .flat_map(|c| [c[0], c[1], c[2], 255])
-            .collect(),
+        png::ColorType::Rgb  => raw.chunks_exact(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
         other => panic!("icons.png: unsupported color type {other:?}"),
     };
+    (info.width, info.height, rgba)
+}
 
-    let color_image = egui::ColorImage::from_rgba_unmultiplied(
-        [info.width as usize, info.height as usize],
+/// Allocate a wgpu texture and upload the icon sheet to it.
+pub fn create_sheet_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::Texture, wgpu::TextureView) {
+    let (w, h, rgba) = decode_sheet();
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("icon_sheet"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count:    1,
+        dimension:       wgpu::TextureDimension::D2,
+        format:          wgpu::TextureFormat::Rgba8Unorm,
+        usage:           wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats:    &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
         &rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset:        0,
+            bytes_per_row: Some(w * 4),
+            rows_per_image: Some(h),
+        },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
     );
-
-    let handle = ctx.load_texture("icons_sprite", color_image, egui::TextureOptions::LINEAR);
-    ctx.data_mut(|d| d.insert_temp(cache_id, handle.clone()));
-    handle
-}
-
-// ── UV helpers ────────────────────────────────────────────────────────────────
-
-/// Convert a sprite's pixel rectangle to normalised UV coordinates.
-pub fn sprite_uv(sprite: IconSprite) -> egui::Rect {
-    egui::Rect::from_min_max(
-        egui::pos2(
-            sprite.x / ICONS_SHEET_WIDTH,
-            sprite.y / ICONS_SHEET_HEIGHT,
-        ),
-        egui::pos2(
-            (sprite.x + sprite.w) / ICONS_SHEET_WIDTH,
-            (sprite.y + sprite.h) / ICONS_SHEET_HEIGHT,
-        ),
-    )
-}
-
-// ── Image helper ─────────────────────────────────────────────────────────────
-
-/// Build an `egui::Image` for a sprite at the given display size.
-/// Useful when constructing a `Button::image(...)` manually (e.g. with `add_enabled`).
-pub fn icon_image(ctx: &egui::Context, sprite: IconSprite, size: f32) -> egui::Image<'static> {
-    let texture = get_texture(ctx);
-    let uv = sprite_uv(sprite);
-    egui::Image::from_texture(egui::load::SizedTexture::new(
-        texture.id(),
-        egui::vec2(size, size),
-    ))
-    .uv(uv)
-}
-
-// ── Button helpers ────────────────────────────────────────────────────────────
-
-/// Render an icon button and return its raw `egui::Response`.
-///
-/// Use this when you need the response itself (e.g. to anchor a popup).
-#[allow(dead_code)]
-pub fn icon_button_resp(ui: &mut egui::Ui, sprite: IconSprite, size: f32) -> egui::Response {
-    let texture = get_texture(ui.ctx());
-    let uv = sprite_uv(sprite);
-    let img = egui::Image::from_texture(egui::load::SizedTexture::new(
-        texture.id(),
-        egui::vec2(size, size),
-    ))
-    .uv(uv);
-    ui.add(egui::Button::image(img))
-}
-
-/// Render an icon button.  Returns `true` if the button was activated via the
-/// VR pointer (`interaction`) semantics.
-pub fn icon_button(
-    ui: &mut egui::Ui,
-    sprite: IconSprite,
-    size: f32,
-    interaction: Option<(egui::Pos2, egui::Pos2)>,
-) -> bool {
-    use super::ResponseExt as _;
-    let texture = get_texture(ui.ctx());
-    let uv = sprite_uv(sprite);
-    let img = egui::Image::from_texture(egui::load::SizedTexture::new(
-        texture.id(),
-        egui::vec2(size, size),
-    ))
-    .uv(uv);
-    ui.add(egui::Button::image(img)).activated_by(interaction)
-}
-
-/// Render an icon button that can appear "selected" (highlighted background).
-/// Returns `true` if activated.
-pub fn icon_button_selected(
-    ui: &mut egui::Ui,
-    sprite: IconSprite,
-    selected: bool,
-    size: f32,
-    interaction: Option<(egui::Pos2, egui::Pos2)>,
-) -> bool {
-    use super::ResponseExt as _;
-    let texture = get_texture(ui.ctx());
-    let uv = sprite_uv(sprite);
-    let img = egui::Image::from_texture(egui::load::SizedTexture::new(
-        texture.id(),
-        egui::vec2(size, size),
-    ))
-    .uv(uv);
-    ui.add(egui::Button::image(img).selected(selected))
-        .activated_by(interaction)
+    let view = tex.create_view(&Default::default());
+    (tex, view)
 }

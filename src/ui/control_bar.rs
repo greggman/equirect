@@ -1,3 +1,9 @@
+use super::draw_list::Color;
+use super::icons;
+use super::ui::{
+    FONT_DEFAULT, FONT_TINY, TEXT, TEXT_MUTED, Ui,
+};
+
 /// Persistent state for the control bar panel.
 pub struct ControlBarState {
     pub video_name: String,
@@ -49,30 +55,20 @@ pub struct ControlBarActions {
     pub menu_toggle: bool,
 }
 
-/// `just_released` — true on the single frame the controller select button
-/// went from pressed → released.  We use this instead of egui's `clicked()`
-/// because egui's internal click-distance gating can silently drop clicks when
-/// the VR controller tremors between press and release.
-/// Returns true if `press_pos` falls inside `resp`'s rect — the definition of
-/// pointer capture: only the widget the button was pressed on may fire.
-pub fn draw(ui: &mut egui::Ui, state: &ControlBarState, interaction: Option<(egui::Pos2, egui::Pos2)>) -> ControlBarActions {
-    use super::icons;
+const ICON_SIZE: f32 = 64.0;
+const RED:   Color = Color { r: 1.0, g: 0.30, b: 0.30, a: 1.0 };
+
+pub fn draw(ui: &mut Ui, state: &ControlBarState) -> ControlBarActions {
     let mut actions = ControlBarActions::default();
 
-    let font_id = egui::FontId::proportional(22.0);
-
     // ── icon row ──────────────────────────────────────────────────────────
-    const ICON_SIZE: f32 = 64.0;
-
     ui.horizontal(|ui| {
-        ui.spacing_mut().button_padding = egui::vec2(8.0, 6.0);
-
-        if icons::icon_button(ui, icons::ICON_PREV, ICON_SIZE, interaction) { actions.prev = true; }
+        if ui.icon_button(icons::ICON_PREV, ICON_SIZE, false) { actions.prev = true; }
 
         let play_sprite = if state.is_playing { icons::ICON_PAUSE } else { icons::ICON_PLAY };
-        if icons::icon_button(ui, play_sprite, ICON_SIZE, interaction) { actions.play_pause = true; }
+        if ui.icon_button(play_sprite, ICON_SIZE, false) { actions.play_pause = true; }
 
-        if icons::icon_button(ui, icons::ICON_NEXT, ICON_SIZE, interaction) { actions.next = true; }
+        if ui.icon_button(icons::ICON_NEXT, ICON_SIZE, false) { actions.next = true; }
 
         let speed_sprite = match state.speed_index {
             0 => icons::ICON_SPEED_1X,
@@ -81,7 +77,7 @@ pub fn draw(ui: &mut egui::Ui, state: &ControlBarState, interaction: Option<(egu
             3 => icons::ICON_SPEED__33X,
             _ => icons::ICON_SPEED__25X,
         };
-        if icons::icon_button(ui, speed_sprite, ICON_SIZE, interaction) { actions.cycle_speed = true; }
+        if ui.icon_button(speed_sprite, ICON_SIZE, false) { actions.cycle_speed = true; }
 
         let loop_sprite = match state.loop_state {
             0 => icons::ICON_LOOP_0,
@@ -89,61 +85,48 @@ pub fn draw(ui: &mut egui::Ui, state: &ControlBarState, interaction: Option<(egu
             _ => icons::ICON_LOOP_2,
         };
         let loop_active = state.loop_state > 0;
-        if icons::icon_button_selected(ui, loop_sprite, loop_active, ICON_SIZE, interaction) { actions.cycle_loop = true; }
+        if ui.icon_button(loop_sprite, ICON_SIZE, loop_active) { actions.cycle_loop = true; }
 
-        if icons::icon_button(ui, icons::ICON_SETTINGS, ICON_SIZE, interaction) { actions.show_settings = true; }
-        if icons::icon_button(ui, icons::ICON_FOLDER,   ICON_SIZE, interaction) { actions.show_browser = true; }
-        if icons::icon_button(ui, icons::ICON_EXIT,     ICON_SIZE, interaction) { actions.exit = true; }
+        if ui.icon_button(icons::ICON_SETTINGS, ICON_SIZE, false) { actions.show_settings = true; }
+        if ui.icon_button(icons::ICON_FOLDER,   ICON_SIZE, false) { actions.show_browser  = true; }
+        if ui.icon_button(icons::ICON_EXIT,     ICON_SIZE, false) { actions.exit          = true; }
     });
 
-    // ── video name / error  +  app version (same row) ────────────────────
+    // ── video name / error  +  app version ────────────────────────────────
     ui.horizontal(|ui| {
-        let text = if let Some(ref err) = state.error {
-            egui::RichText::new(err.as_str()).font(font_id.clone()).color(egui::Color32::RED)
+        if let Some(err) = &state.error {
+            ui.label_styled(err, FONT_DEFAULT, RED);
         } else {
-            egui::RichText::new(state.video_name.as_str()).font(font_id.clone()).color(egui::Color32::WHITE)
-        };
-        ui.label(text);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                egui::RichText::new(concat!(
-                    env!("CARGO_PKG_NAME"), " v", env!("CARGO_PKG_VERSION")
-                ))
-                .font(egui::FontId::proportional(12.0))
-                .color(egui::Color32::DARK_GRAY),
+            ui.label_styled(&state.video_name, FONT_DEFAULT, TEXT);
+        }
+        ui.horizontal_rtl(|ui| {
+            ui.label_styled(
+                concat!(env!("CARGO_PKG_NAME"), " v", env!("CARGO_PKG_VERSION")),
+                FONT_TINY, TEXT_MUTED,
             );
         });
     });
 
-    // ── seek scrubber + time (same row) ──────────────────────────────────
+    // ── seek scrubber + time (same row) ───────────────────────────────────
     let time_label = format!(
         "{} / {}",
         fmt_time(state.current_secs),
         if state.duration_secs > 0.0 { fmt_time(state.duration_secs) } else { "--:--".into() }
     );
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        ui.label(
-            egui::RichText::new(time_label)
-                .font(font_id.clone())
-                .color(egui::Color32::WHITE),
-        );
 
-        let mut frac = if state.duration_secs > 0.0 {
-            (state.current_secs / state.duration_secs).clamp(0.0, 1.0) as f32
-        } else {
-            0.0
-        };
+    let mut frac = if state.duration_secs > 0.0 {
+        (state.current_secs / state.duration_secs).clamp(0.0, 1.0) as f32
+    } else { 0.0 };
 
-        let width = ui.available_width();
-        ui.spacing_mut().slider_width = width;
-        let resp = ui.add(
-            egui::Slider::new(&mut frac, 0.0f32..=1.0f32)
-                .show_value(false)
-                .trailing_fill(true),
-        );
-        if resp.changed() {
+    ui.horizontal(|ui| {
+        // Reserve the right-side label width up front so the slider can use
+        // the rest of the row.
+        let time_w   = ui.measure_text(&time_label, FONT_DEFAULT) + 12.0;
+        let slider_w = (ui.available_width() - time_w - 8.0).max(50.0);
+        if ui.slider_sized(slider_w, &mut frac, 0.0, 1.0) {
             actions.seek_frac = Some(frac);
         }
+        ui.label_styled(&time_label, FONT_DEFAULT, TEXT);
     });
 
     actions

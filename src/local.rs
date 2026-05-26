@@ -6,6 +6,7 @@ use crate::input::ControllerState;
 use crate::mode::Mode;
 use crate::pointer_renderer::PointerRenderer;
 use crate::renderer::Renderer;
+use crate::ui::assets::UiAssets;
 use crate::ui::browser::{BrowserActions, BrowserState, draw as browser_draw};
 use crate::ui::control_bar::{ControlBarActions, ControlBarState};
 use crate::ui::panel::PanelRenderer;
@@ -182,6 +183,7 @@ impl Mode for LocalMode {
     fn render_frame(
         &mut self,
         renderer:          &Renderer,
+        ui_assets:         &mut UiAssets,
         _video_layer:      Option<(&mut VideoSwapchain, &VideoSettings)>,
         video_shader:      Option<(&VideoRenderer, &VideoTexture, &VideoSettings)>,
         mut panel:         Option<(&mut PanelRenderer, &ControlBarState)>,
@@ -194,24 +196,24 @@ impl Mode for LocalMode {
         let cursor      = self.cursor_controller();
         let controllers = [Some(cursor), None];
 
-        // Update UI textures (CPU-side egui run + GPU upload).
+        // Update UI textures (CPU-side draw build + GPU upload).
         let mut cb_actions = match &mut panel {
-            Some((p, s)) => p.update(&renderer.device, &renderer.queue, s, &controllers),
+            Some((p, s)) => p.update(&renderer.device, &renderer.queue, ui_assets, s, &controllers),
             None => ControlBarActions::default(),
         };
         cb_actions.menu_toggle = menu_toggle;
 
         let browser_actions = match &mut browser {
             Some((p, s)) => p.update_ui(
-                &renderer.device, &renderer.queue, &controllers,
-                |ui, interaction| browser_draw(ui, s, interaction),
+                &renderer.device, &renderer.queue, ui_assets, &controllers,
+                |ui| browser_draw(ui, s),
             ),
             None => BrowserActions::default(),
         };
         let settings_actions = match &mut settings {
             Some((p, s)) => p.update_ui(
-                &renderer.device, &renderer.queue, &controllers,
-                |ui, interaction| settings_draw(ui, s, interaction),
+                &renderer.device, &renderer.queue, ui_assets, &controllers,
+                |ui| settings_draw(ui, s),
             ),
             None => SettingsActions::default(),
         };

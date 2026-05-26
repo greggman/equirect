@@ -14,14 +14,13 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 winresource = "0.1"
 
 [dependencies]
+ab_glyph = "0.2"
 anyhow = "1"
 ash = "0.38"
 bytemuck = { version = "1", features = ["derive"] }
 cpal = "0.15"
 directories = "5"
-egui = "0.34.1"
 png = "0.17"
-egui-wgpu = "0.34.1"
 glam = "0.32.1"
 openxr = { version = "0.21.1", features = ["static", "linked"] }
 pollster = "0.4"

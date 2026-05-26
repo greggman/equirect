@@ -67,6 +67,8 @@ pub struct BrowserState {
     /// Set to true when entries are freshly loaded (not served from cache).
     /// The app reads this to update the folder cache, then clears it.
     pub just_loaded: bool,
+    /// Toggled by the "Volumes" button — shows the drive picker inline.
+    pub show_volumes: bool,
     // Async loading state for remote locations.
     loading_rx: Option<std::sync::mpsc::Receiver<Result<Vec<BrowserEntry>, String>>>,
     pub is_loading:  bool,
@@ -97,6 +99,7 @@ impl BrowserState {
             current_video,
             needs_scroll_to_current: true,
             just_loaded: false,
+            show_volumes: false,
             loading_rx: None,
             is_loading: false,
             load_error: None,
@@ -228,193 +231,131 @@ pub fn remote_entries(items: Vec<crate::net::RemoteItem>) -> Vec<BrowserEntry> {
 
 // ── draw ──────────────────────────────────────────────────────────────────────
 
-pub fn draw(
-    ui: &mut egui::Ui,
-    state: &mut BrowserState,
-    interaction: Option<(egui::Pos2, egui::Pos2)>,
-) -> BrowserActions {
-    use super::icons;
-    use super::ResponseExt as _;
+use super::draw_list::Color;
+use super::icons;
+use super::ui::{Align, FONT_DEFAULT, ROW_HOVER, ROW_SELECTED, TEXT, TEXT_MUTED, Ui};
 
-    // Check if an async remote load completed this frame.
+const ROW_H: f32 = 34.0;
+const YELLOW:    Color = Color { r: 1.0, g: 0.92, b: 0.30, a: 1.0 };
+const RED:       Color = Color { r: 1.0, g: 0.30, b: 0.30, a: 1.0 };
+const LOAD_HINT: Color = Color { r: 0.59, g: 0.78, b: 1.0,  a: 1.0 };
+
+pub fn draw(ui: &mut Ui, state: &mut BrowserState) -> BrowserActions {
     state.poll_loading();
 
     let mut actions = BrowserActions::default();
 
-    let font    = egui::FontId::proportional(22.0);
-    let btn_pad = egui::vec2(10.0, 6.0);
+    let scroll_to_current  = state.needs_scroll_to_current;
+    state.needs_scroll_to_current = false;
+    let current_video      = state.current_video.clone();
+    let parent_loc         = state.location.parent();
+    let dir_display        = state.location.display();
+    let is_local           = state.location.as_local().is_some();
 
-    // Pre-extract everything we need before the borrow on state.entries begins.
-    let scroll_to_current              = state.needs_scroll_to_current;
-    state.needs_scroll_to_current      = false;
-    let current_video                  = state.current_video.clone();
-    let parent_loc                     = state.location.parent();
-    let dir_display                    = state.location.display();
-
-    // Make the scrollbar wide and always-visible so it's easy to grab in VR.
-    ui.style_mut().spacing.scroll.bar_width = 20.0;
-    ui.style_mut().spacing.scroll.floating  = false;
-
-    // ── header: path + volumes button + close ────────────────────────────────
-    ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), 40.0),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-        ui.spacing_mut().button_padding = btn_pad;
-
-        ui.label(
-            egui::RichText::new(dir_display)
-                .font(font.clone())
-                .color(egui::Color32::LIGHT_GRAY),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().button_padding = egui::vec2(6.0, 6.0);
-
-            // Close button (rightmost).
-            if icons::icon_button(ui, icons::ICON_CLOSE, 24.0, interaction) {
+    // ── header: path label, volumes toggle, close ────────────────────────────
+    ui.horizontal(|ui| {
+        ui.label_styled(&dir_display, FONT_DEFAULT, TEXT_MUTED);
+        ui.horizontal_rtl(|ui| {
+            if ui.icon_button(icons::ICON_CLOSE, 28.0, false) {
                 actions.close = true;
             }
-
-            // Volumes (drive picker) ComboBox — only shown for local directories.
-            if state.location.as_local().is_some() {
-                let mut vol_selected: Option<PathBuf> = None;
-                egui::ComboBox::from_id_salt("volumes_picker")
-                    .selected_text("Volumes")
-                    .show_ui(ui, |ui| {
-                        let vols = crate::volumes::list_volumes();
-                        if vols.is_empty() {
-                            ui.label("(no volumes found)");
-                        } else {
-                            for vol in &vols {
-                                if ui.selectable_label(false, &vol.label).clicked() {
-                                    vol_selected = Some(vol.root.clone());
-                                }
-                            }
-                        }
-                    });
-                if let Some(root) = vol_selected {
-                    actions.select_volume = Some(root);
+            if is_local {
+                if ui.button("Volumes") {
+                    state.show_volumes = !state.show_volumes;
                 }
             }
         });
     });
     ui.separator();
 
-    // ── loading / error states ────────────────────────────────────────────────
+    // ── volumes popup (inline — replaces the entry list while open) ──────────
+    if state.show_volumes && is_local {
+        let vols = crate::volumes::list_volumes();
+        if vols.is_empty() {
+            ui.label_styled("(no volumes found)", FONT_DEFAULT, TEXT_MUTED);
+        } else {
+            ui.scroll_area(0xC0_FFEEu64, ui.available_height(), |ui| {
+                for vol in &vols {
+                    let rect = ui.allocate_full_width(ROW_H);
+                    let bg = if ui.hovered(rect) { ROW_HOVER } else { Color::TRANSPARENT };
+                    if bg.a > 0.0 { ui.draw.rect(rect, bg); }
+                    ui.draw_text_in(rect, &vol.label, FONT_DEFAULT, TEXT, Align::Left);
+                    if ui.activated(rect) {
+                        actions.select_volume = Some(vol.root.clone());
+                        state.show_volumes    = false;
+                    }
+                }
+            });
+        }
+        return actions;
+    }
+
+    // ── loading / error states ───────────────────────────────────────────────
     if state.is_loading {
-        ui.label(
-            egui::RichText::new("Loading…")
-                .font(font.clone())
-                .color(egui::Color32::from_rgb(150, 200, 255)),
-        );
+        ui.label_styled("Loading…", FONT_DEFAULT, LOAD_HINT);
         return actions;
     }
-    if let Some(ref err) = state.load_error.clone() {
-        ui.label(
-            egui::RichText::new(format!("Error: {err}"))
-                .font(font.clone())
-                .color(egui::Color32::RED),
-        );
+    if let Some(err) = state.load_error.clone() {
+        ui.label_styled(&format!("Error: {err}"), FONT_DEFAULT, RED);
         return actions;
     }
 
-    // ── scrollable file / folder list ─────────────────────────────────────────
-
-    let row_h     = 34.0_f32;
-    let row_total = row_h + 2.0;
-
+    // ── scrollable list ──────────────────────────────────────────────────────
     let viewport_h = ui.available_height();
 
-    let initial_offset: Option<f32> = if scroll_to_current {
-        state.entries.iter().position(|e| {
+    // If we just navigated, scroll the current video into view.  We do this by
+    // pre-seeding the scroll_area's stored offset before the area renders.
+    if scroll_to_current {
+        if let Some(idx) = state.entries.iter().position(|e| {
             matches!(e, BrowserEntry::Video(_, loc) if current_video.as_ref() == Some(loc))
-        }).map(|idx| {
-            (idx as f32 * row_total - viewport_h / 2.0 + row_h / 2.0).max(0.0)
-        })
-    } else {
-        None
-    };
+        }) {
+            let off = (idx as f32 * (ROW_H + 2.0) - viewport_h / 2.0 + ROW_H / 2.0).max(0.0);
+            ui.set_scroll_offset(BROWSER_LIST_ID, off);
+        }
+    }
 
-    let scroll_area = egui::ScrollArea::vertical().auto_shrink([false, false]);
-    let scroll_area = match initial_offset {
-        Some(off) => scroll_area.vertical_scroll_offset(off),
-        None      => scroll_area,
-    };
-
-    scroll_area.show(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 2.0;
-
-        let clip         = ui.clip_rect();
-        let scroll_layer = ui.layer_id();
-        let clipped_interaction = interaction.filter(|(press, release)| {
-            clip.contains(*press) && clip.contains(*release)
-                && ui.ctx().layer_id_at(*press) .map_or(true, |l| l == scroll_layer)
-                && ui.ctx().layer_id_at(*release).map_or(true, |l| l == scroll_layer)
-        });
-
-        let hover_bg  = ui.visuals().widgets.hovered.weak_bg_fill;
-        let select_bg = egui::Color32::from_rgb(40, 60, 90);
-        let pad_x     = btn_pad.x;
-
+    ui.scroll_area(BROWSER_LIST_ID, viewport_h, |ui| {
         for entry in &state.entries {
-            let w = ui.available_width();
-            // (display, is_selected, text_color, navigate_up, select_dir, play)
-            let (display, is_selected, text_color, navigate_up, select_dir, play_loc):
-                (String, bool, egui::Color32, Option<Location>, Option<Location>, Option<Location>) = match entry
+            let (display, is_selected, text_color, nav_up, select_dir, play_loc):
+                (String, bool, Color, Option<Location>, Option<Location>, Option<Location>) = match entry
             {
                 BrowserEntry::Parent => (
                     "..".to_string(),
-                    false,
-                    egui::Color32::WHITE,
-                    parent_loc.clone(), // go up — use cache
-                    None,
-                    None,
+                    false, TEXT,
+                    parent_loc.clone(), None, None,
                 ),
                 BrowserEntry::Dir(name, loc) => (
                     format!("📁  {name}"),
-                    false,
-                    egui::Color32::WHITE,
-                    None,
-                    Some(loc.clone()), // explicit folder click — invalidate cache
-                    None,
+                    false, TEXT,
+                    None, Some(loc.clone()), None,
                 ),
                 BrowserEntry::Video(name, loc) => {
                     let is_cur = current_video.as_ref() == Some(loc);
-                    let color  = if is_cur { egui::Color32::YELLOW } else { egui::Color32::WHITE };
+                    let color  = if is_cur { YELLOW } else { TEXT };
                     (name.clone(), is_cur, color, None, None, Some(loc.clone()))
                 }
             };
 
-            let (rect, resp) = ui.allocate_exact_size(
-                egui::vec2(w, row_h),
-                egui::Sense::click() | egui::Sense::hover(),
-            );
-            if ui.is_rect_visible(rect) {
-                let bg = if resp.hovered() {
-                    hover_bg
-                } else if is_selected {
-                    select_bg
-                } else {
-                    egui::Color32::TRANSPARENT
-                };
-                if bg != egui::Color32::TRANSPARENT {
-                    ui.painter().rect_filled(rect, 2.0, bg);
-                }
-                ui.painter().text(
-                    egui::pos2(rect.min.x + pad_x, rect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    &display,
-                    font.clone(),
-                    text_color,
-                );
-            }
-            if resp.activated_by(clipped_interaction) {
-                if let Some(loc) = navigate_up { actions.navigate    = Some(loc); }
-                if let Some(loc) = select_dir  { actions.select_dir  = Some(loc); }
-                if let Some(loc) = play_loc    { actions.play        = Some(loc); }
+            let rect = ui.allocate_full_width(ROW_H);
+            let bg = if ui.hovered(rect) {
+                ROW_HOVER
+            } else if is_selected {
+                ROW_SELECTED
+            } else {
+                Color::TRANSPARENT
+            };
+            if bg.a > 0.0 { ui.draw.rect(rect, bg); }
+            ui.draw_text_in(rect, &display, FONT_DEFAULT, text_color, Align::Left);
+
+            if ui.activated(rect) {
+                if let Some(loc) = nav_up     { actions.navigate     = Some(loc); }
+                if let Some(loc) = select_dir { actions.select_dir   = Some(loc); }
+                if let Some(loc) = play_loc   { actions.play         = Some(loc); }
             }
         }
     });
 
     actions
 }
+
+const BROWSER_LIST_ID: u64 = 0xB0_55_E5;

@@ -583,6 +583,7 @@ impl VrContext {
     pub fn render_frame(
         &mut self,
         renderer:         &Renderer,
+        ui_assets:        &mut crate::ui::assets::UiAssets,
         // XR composition-layer path (quad / cylinder / equirect2).
         mut video_layer:  Option<(&mut VideoSwapchain, &VideoSettings)>,
         // Shader fallback for fisheye (or when no video swapchain exists yet).
@@ -675,7 +676,7 @@ impl VrContext {
 
         // Build controller rays in the panel's local frame (inverse of base_orientation).
         // Panels live at (0, y, -2) in local space; base_orientation rotates that frame
-        // into stage space.  Hit-testing and egui input both need local-frame rays.
+        // into stage space.  Hit-testing and UI input both need local-frame rays.
         let inv_orient = self.base_orientation.inverse();
         let oriented_controllers: [Option<ControllerState>; 2] = [
             controllers[0].map(|c| ControllerState {
@@ -690,9 +691,9 @@ impl VrContext {
             }),
         ];
 
-        // Update the control-bar panel egui texture once (shared by both eyes).
+        // Update the control-bar panel UI texture once (shared by both eyes).
         let mut cb_actions = match &mut panel {
-            Some((p, s)) => p.update(&renderer.device, &renderer.queue, s, &oriented_controllers),
+            Some((p, s)) => p.update(&renderer.device, &renderer.queue, ui_assets, s, &oriented_controllers),
             None => ControlBarActions::default(),
         };
         cb_actions.menu_toggle = menu_just_pressed;
@@ -716,20 +717,20 @@ impl VrContext {
             self.last_seek_time = None;
         }
 
-        // Update the browser panel egui texture once (shared by both eyes).
+        // Update the browser panel UI texture once (shared by both eyes).
         let browser_actions = match &mut browser {
             Some((p, s)) => p.update_ui(
-                &renderer.device, &renderer.queue, &oriented_controllers,
-                |ui, interaction| browser_draw(ui, s, interaction),
+                &renderer.device, &renderer.queue, ui_assets, &oriented_controllers,
+                |ui| browser_draw(ui, s),
             ),
             None => BrowserActions::default(),
         };
 
-        // Update the settings panel egui texture once (shared by both eyes).
+        // Update the settings panel UI texture once (shared by both eyes).
         let settings_actions = match &mut settings {
             Some((p, s)) => p.update_ui(
-                &renderer.device, &renderer.queue, &oriented_controllers,
-                |ui, interaction| settings_draw(ui, s, interaction),
+                &renderer.device, &renderer.queue, ui_assets, &oriented_controllers,
+                |ui| settings_draw(ui, s),
             ),
             None => SettingsActions::default(),
         };
@@ -981,6 +982,7 @@ impl crate::mode::Mode for VrContext {
     fn render_frame(
         &mut self,
         renderer:         &Renderer,
+        ui_assets:        &mut crate::ui::assets::UiAssets,
         video_layer:      Option<(&mut VideoSwapchain, &VideoSettings)>,
         video_shader:     Option<(&VideoRenderer, &VideoTexture, &VideoSettings)>,
         panel:            Option<(&mut PanelRenderer, &ControlBarState)>,
@@ -989,7 +991,7 @@ impl crate::mode::Mode for VrContext {
         pointer_renderer: Option<&PointerRenderer>,
     ) -> (ControlBarActions, BrowserActions, SettingsActions) {
         VrContext::render_frame(
-            self, renderer, video_layer, video_shader, panel, browser, settings, pointer_renderer,
+            self, renderer, ui_assets, video_layer, video_shader, panel, browser, settings, pointer_renderer,
         )
     }
 }

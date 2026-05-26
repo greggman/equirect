@@ -1,63 +1,50 @@
-/// Register system CJK fonts as egui fallbacks.
+/// Return owned font bytes for the primary font and any fallbacks found on
+/// the host system.  Order matters — glyphs are looked up in this sequence.
 ///
-/// egui's built-in font covers Latin, Greek, Cyrillic, and a few other scripts.
-/// For CJK (Japanese, Chinese, Korean) and other non-Latin scripts we probe a
-/// short list of well-known Windows font paths and load whichever ones exist.
-/// Users who have filenames in a given script will have the matching language
-/// pack — and therefore the matching font — installed.
-///
-/// Each found font is appended to the `Proportional` family's fallback list, so
-/// Latin text continues to use the built-in font and CJK characters fall through
-/// to these.
-pub fn install_system_fonts(ctx: &egui::Context) {
-    // Ordered by preference within each script group.  Only paths that exist
-    // on the system are loaded; missing ones are silently skipped.
+/// On Windows we use Segoe UI as the primary (always present on supported
+/// versions) and probe a short list of CJK system fonts as fallbacks.  If
+/// Segoe UI is missing for some reason, Arial is tried next.
+pub fn load_font_bytes() -> (Vec<u8>, Vec<Vec<u8>>) {
     #[cfg(target_os = "windows")]
-    let candidates: &[&str] = &[
+    let primary_candidates: &[&str] = &[
+        r"C:\Windows\Fonts\segoeui.ttf",
+        r"C:\Windows\Fonts\arial.ttf",
+        r"C:\Windows\Fonts\tahoma.ttf",
+    ];
+    #[cfg(not(target_os = "windows"))]
+    let primary_candidates: &[&str] = &[];
+
+    let primary = primary_candidates
+        .iter()
+        .find_map(|p| std::fs::read(p).ok())
+        .unwrap_or_else(|| panic!("ui: no primary font found (looked in {primary_candidates:?})"));
+
+    let mut fallbacks: Vec<Vec<u8>> = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    let fallback_candidates: &[&str] = &[
         // Japanese
-        r"C:\Windows\Fonts\meiryo.ttc",     // Meiryo — clean, modern
-        r"C:\Windows\Fonts\msgothic.ttc",   // MS Gothic — always present with JP pack
-        // Chinese Simplified
-        r"C:\Windows\Fonts\msyh.ttc",       // Microsoft YaHei — clean, modern
-        r"C:\Windows\Fonts\simsun.ttc",     // SimSun — always present with SC pack
-        // Chinese Traditional
-        r"C:\Windows\Fonts\msjh.ttc",       // Microsoft JhengHei
-        r"C:\Windows\Fonts\mingliu.ttc",    // MingLiU — always present with TC pack
+        r"C:\Windows\Fonts\meiryo.ttc",
+        r"C:\Windows\Fonts\msgothic.ttc",
+        // Simplified Chinese
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\simsun.ttc",
+        // Traditional Chinese
+        r"C:\Windows\Fonts\msjh.ttc",
+        r"C:\Windows\Fonts\mingliu.ttc",
         // Korean
-        r"C:\Windows\Fonts\malgun.ttf",     // Malgun Gothic — clean, modern
-        r"C:\Windows\Fonts\gulim.ttc",      // Gulim — always present with KO pack
+        r"C:\Windows\Fonts\malgun.ttf",
+        r"C:\Windows\Fonts\gulim.ttc",
     ];
 
     #[cfg(not(target_os = "windows"))]
-    let candidates: &[&str] = &[];
+    let fallback_candidates: &[&str] = &[];
 
-    if candidates.is_empty() {
-        return;
+    for path in fallback_candidates {
+        if let Ok(bytes) = std::fs::read(path) {
+            fallbacks.push(bytes);
+        }
     }
 
-    let mut fonts = egui::FontDefinitions::default();
-
-    for path in candidates {
-        let Ok(bytes) = std::fs::read(path) else { continue };
-
-        // Use the filename stem as a unique key (e.g. "meiryo", "msgothic").
-        let name = std::path::Path::new(path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("sys_font")
-            .to_owned();
-
-        fonts
-            .font_data
-            .insert(name.clone(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
-
-        // Append after the built-in font so Latin still uses the default.
-        fonts
-            .families
-            .entry(egui::FontFamily::Proportional)
-            .or_default()
-            .push(name);
-    }
-
-    ctx.set_fonts(fonts);
+    (primary, fallbacks)
 }

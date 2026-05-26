@@ -1,3 +1,6 @@
+use super::icons::{self, IconSprite};
+use super::ui::{FONT_DEFAULT, FONT_SMALL, TEXT, TEXT_DISABLED, TEXT_MUTED, Ui};
+
 /// Video geometry mode.
 #[derive(Clone, Copy, PartialEq, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub enum VideoMode {
@@ -50,61 +53,28 @@ pub struct SettingsActions {
     pub changed: bool,
 }
 
-pub fn draw(
-    ui: &mut egui::Ui,
-    state: &mut VideoSettings,
-    interaction: Option<(egui::Pos2, egui::Pos2)>,
-) -> SettingsActions {
-    use super::icons;
-    use super::icons::IconSprite;
-    use super::ResponseExt as _;
+const ICON_SIZE: f32 = 96.0;
+
+pub fn draw(ui: &mut Ui, state: &mut VideoSettings) -> SettingsActions {
     let mut actions = SettingsActions::default();
 
-    let font    = egui::FontId::proportional(22.0);
-    let btn_pad = egui::vec2(10.0, 6.0);
-
-    // Helper: whether projection section is relevant.
     let proj_enabled   = matches!(state.mode, VideoMode::View180 | VideoMode::View360);
-    // Stereo is relevant for 3D, 180, 360.
     let stereo_enabled = matches!(state.mode, VideoMode::Sbs3D | VideoMode::View180 | VideoMode::View360);
 
-    // ── header ───────────────────────────────────────────────────────────────
-    ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), 40.0),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            ui.spacing_mut().button_padding = btn_pad;
-
-            ui.label(
-                egui::RichText::new("Settings")
-                    .font(egui::FontId::proportional(24.0))
-                    .color(egui::Color32::WHITE),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().button_padding = egui::vec2(6.0, 6.0);
-                if icons::icon_button(ui, icons::ICON_CLOSE, 24.0, interaction) {
-                    actions.close = true;
-                }
-            });
-        },
-    );
+    // ── header (title left, close right) ─────────────────────────────────────
+    ui.horizontal(|ui| {
+        ui.label_styled("Settings", FONT_DEFAULT + 2.0, TEXT);
+        ui.horizontal_rtl(|ui| {
+            if ui.icon_button(icons::ICON_CLOSE, 28.0, false) {
+                actions.close = true;
+            }
+        });
+    });
     ui.separator();
-
-    // ── section helper ───────────────────────────────────────────────────────
-    // Draws a section heading then a horizontal row of radio-style buttons.
-    // Returns true if any button was pressed.
-    let section_label = |ui: &mut egui::Ui, text: &str, enabled: bool| {
-        let color = if enabled { egui::Color32::LIGHT_GRAY } else { egui::Color32::DARK_GRAY };
-        ui.label(egui::RichText::new(text).font(egui::FontId::proportional(16.0)).color(color));
-    };
-
-    const ICON_SIZE: f32 = 96.0;
 
     // ── 1. Video mode ─────────────────────────────────────────────────────────
     section_label(ui, "Video Mode", true);
     ui.horizontal(|ui| {
-        ui.spacing_mut().button_padding = btn_pad;
-
         let icon_modes: &[(IconSprite, VideoMode)] = &[
             (icons::ICON_PLANE,      VideoMode::Flat2D),
             (icons::ICON_CURVE,      VideoMode::Curved2D),
@@ -114,7 +84,7 @@ pub fn draw(
         ];
         for &(icon, mode) in icon_modes {
             let selected = state.mode == mode;
-            if icons::icon_button_selected(ui, icon, selected, ICON_SIZE, interaction) && !selected {
+            if ui.icon_button(icon, ICON_SIZE, selected) && !selected {
                 state.mode = mode;
                 if !matches!(state.mode, VideoMode::View180 | VideoMode::View360) {
                     state.proj = Projection::default();
@@ -130,8 +100,7 @@ pub fn draw(
 
     // ── 2. Projection ─────────────────────────────────────────────────────────
     section_label(ui, "Projection", proj_enabled);
-    ui.add_enabled_ui(proj_enabled, |ui| {
-        ui.spacing_mut().button_padding = btn_pad;
+    ui.disabled(!proj_enabled, |ui| {
         ui.horizontal(|ui| {
             let projs: &[(IconSprite, Projection)] = &[
                 (icons::ICON_EQUIRECT, Projection::Equirect),
@@ -139,7 +108,7 @@ pub fn draw(
             ];
             for &(icon, proj) in projs {
                 let selected = state.proj == proj;
-                if icons::icon_button_selected(ui, icon, selected, ICON_SIZE, interaction) && !selected && proj_enabled {
+                if ui.icon_button(icon, ICON_SIZE, selected) && !selected {
                     state.proj = proj;
                     actions.changed = true;
                 }
@@ -150,8 +119,7 @@ pub fn draw(
 
     // ── 3. Stereo layout ──────────────────────────────────────────────────────
     section_label(ui, "Stereo Layout", stereo_enabled);
-    ui.add_enabled_ui(stereo_enabled, |ui| {
-        ui.spacing_mut().button_padding = btn_pad;
+    ui.disabled(!stereo_enabled, |ui| {
         ui.horizontal(|ui| {
             // "One View" only makes sense for 180/360 (not plain 3D).
             let one_view_ok = matches!(state.mode, VideoMode::View180 | VideoMode::View360);
@@ -164,12 +132,10 @@ pub fn draw(
             ];
             for &(icon, layout, avail) in layouts {
                 let selected = state.stereo == layout;
-                let resp = ui.add_enabled(
-                    avail,
-                    egui::Button::image(icons::icon_image(ui.ctx(), icon, ICON_SIZE))
-                        .selected(selected),
-                );
-                if resp.activated_by(interaction) && !selected && stereo_enabled && avail {
+                let pressed = ui.disabled(!avail, |ui| {
+                    ui.icon_button(icon, ICON_SIZE, selected)
+                });
+                if pressed && !selected && avail {
                     state.stereo = layout;
                     actions.changed = true;
                 }
@@ -181,27 +147,24 @@ pub fn draw(
     // ── 4. Zoom ───────────────────────────────────────────────────────────────
     section_label(ui, "Zoom", true);
     ui.horizontal(|ui| {
-        ui.style_mut().text_styles.insert(egui::TextStyle::Button, font.clone());
-        ui.spacing_mut().button_padding = btn_pad;
-
-        // Reset button
-        if ui.button("1×").activated_by(interaction) && (state.zoom - 1.0).abs() > 0.001 {
+        if ui.button("1×") && (state.zoom - 1.0).abs() > 0.001 {
             state.zoom = 1.0;
             actions.changed = true;
         }
-
-        // Zoom slider: 0.25× – 4.0×
-        let avail = ui.available_width();
-        ui.spacing_mut().slider_width = avail;
-        let resp = ui.add(
-            egui::Slider::new(&mut state.zoom, 0.25_f32..=4.0_f32)
-                .show_value(true)
-                .custom_formatter(|v, _| format!("{v:.2}×")),
-        );
-        if resp.changed() {
+        // Reserve space for the zoom value label on the right.
+        let zoom_label = format!("{:.2}×", state.zoom);
+        let label_w    = ui.measure_text(&zoom_label, FONT_DEFAULT) + 12.0;
+        let slider_w   = (ui.available_width() - label_w - 8.0).max(50.0);
+        if ui.slider_sized(slider_w, &mut state.zoom, 0.25, 4.0) {
             actions.changed = true;
         }
+        ui.label_styled(&zoom_label, FONT_DEFAULT, TEXT);
     });
 
     actions
+}
+
+fn section_label(ui: &mut Ui, text: &str, enabled: bool) {
+    let color = if enabled { TEXT_MUTED } else { TEXT_DISABLED };
+    ui.label_styled(text, FONT_SMALL, color);
 }

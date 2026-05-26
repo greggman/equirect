@@ -137,6 +137,7 @@ enum PanelMode {
 }
 use crate::local::LocalMode;
 use crate::mode::Mode;
+use crate::ui::assets::UiAssets;
 use crate::ui::control_bar::{ControlBarState, SPEEDS};
 use crate::ui::panel::PanelRenderer;
 use crate::video::decoder::VideoDecoder;
@@ -150,6 +151,8 @@ pub struct App {
     mode: Option<Box<dyn Mode>>,
     /// True if `--local` was passed on the command line — skip VR setup entirely.
     local_mode: bool,
+    /// Shared GPU UI assets (font atlas, icon sheet, pipeline).
+    ui_assets: Option<UiAssets>,
     renderer: Option<Renderer>,
     video_decoder: Option<VideoDecoder>,
     video_texture: Option<VideoTexture>,
@@ -201,6 +204,7 @@ impl App {
         Self {
             mode: None,
             local_mode,
+            ui_assets: None,
             renderer: None,
             video_decoder: None,
             video_texture: None,
@@ -379,6 +383,7 @@ impl ApplicationHandler for App {
             ));
         }
 
+        self.ui_assets = Some(UiAssets::new(&renderer.device, &renderer.queue));
         self.renderer = Some(renderer);
         self.mode = mode;
     }
@@ -500,8 +505,10 @@ impl ApplicationHandler for App {
                 if self.panel_mode != PanelMode::Hidden { self.pointer_renderer.as_ref() }
                 else { None };
 
+            let ui_assets = self.ui_assets.as_mut().expect("UiAssets not initialised");
             let (actions, browser_actions, settings_actions) = mode.render_frame(
                 renderer,
+                ui_assets,
                 video_layer_arg,
                 video_shader_arg,
                 panel_arg,

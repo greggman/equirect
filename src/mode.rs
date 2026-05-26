@@ -2,6 +2,7 @@ use winit::event::WindowEvent;
 
 use crate::pointer_renderer::PointerRenderer;
 use crate::renderer::Renderer;
+use crate::ui::assets::UiAssets;
 use crate::ui::browser::{BrowserActions, BrowserState};
 use crate::ui::control_bar::{ControlBarActions, ControlBarState};
 use crate::ui::panel::PanelRenderer;
@@ -41,6 +42,7 @@ pub trait Mode {
     fn render_frame(
         &mut self,
         renderer:         &Renderer,
+        ui_assets:        &mut UiAssets,
         video_layer:      Option<(&mut VideoSwapchain, &VideoSettings)>,
         video_shader:     Option<(&VideoRenderer, &VideoTexture, &VideoSettings)>,
         panel:            Option<(&mut PanelRenderer, &ControlBarState)>,

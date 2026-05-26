@@ -3,26 +3,26 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use crate::input::ControllerState;
+use super::assets::{PANEL_OFFSCREEN_FORMAT, UiAssets};
 use super::control_bar::{ControlBarActions, ControlBarState, draw};
+use super::draw_list::DrawList;
+use super::ui::{Ui, UiState, CursorInput, begin_frame, PANEL_BG};
 
-/// Pixels scrolled per frame when the thumbstick is fully deflected.
+/// Pixels scrolled per frame at full thumbstick deflection.
 const THUMBSTICK_SCROLL_SPEED: f32 = 40.0;
 
-// ── GPU types (identical to video_renderer) ────────────────────────────────
+// ── GPU types for the 3-D quad pipeline ───────────────────────────────────────
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct CameraUniform {
     projection: [[f32; 4]; 4],
-    view: [[f32; 4]; 4],
+    view:       [[f32; 4]; 4],
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
-struct Vertex {
-    position: [f32; 3],
-    uv: [f32; 2],
-}
+struct Vertex { position: [f32; 3], uv: [f32; 2] }
 
 fn panel_quad(center: Vec3, width_m: f32, height_m: f32) -> [Vertex; 6] {
     let hw = width_m / 2.0;
@@ -38,77 +38,66 @@ fn panel_quad(center: Vec3, width_m: f32, height_m: f32) -> [Vertex; 6] {
     ]
 }
 
-// ── PanelRenderer ──────────────────────────────────────────────────────────
+// ── PanelRenderer ─────────────────────────────────────────────────────────────
 
 pub struct PanelRenderer {
-    // egui
-    egui_ctx: egui::Context,
-    egui_renderer: egui_wgpu::Renderer,
-    offscreen_view: wgpu::TextureView,
-    pixel_width: u32,
-    pixel_height: u32,
-    // quad pipeline
-    pipeline: wgpu::RenderPipeline,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
+    // 3-D quad pipeline (renders the offscreen UI texture into the scene).
+    pipeline:           wgpu::RenderPipeline,
+    camera_buffer:      wgpu::Buffer,
+    camera_bind_group:  wgpu::BindGroup,
     texture_bind_group: wgpu::BindGroup,
     #[allow(dead_code)]
-    texture_bgl: wgpu::BindGroupLayout,
+    texture_bgl:        wgpu::BindGroupLayout,
     #[allow(dead_code)]
-    sampler: wgpu::Sampler,
-    vertex_buffer: wgpu::Buffer,
+    sampler:            wgpu::Sampler,
+    vertex_buffer:      wgpu::Buffer,
     #[allow(dead_code)]
-    offscreen_texture: wgpu::Texture, // kept alive alongside bind group
-    // hit-testing geometry (panel is always axis-aligned in stage space)
+    offscreen_texture:  wgpu::Texture,
+    offscreen_view:     wgpu::TextureView,
+
+    pixel_width:  u32,
+    pixel_height: u32,
+
+    // Hit-testing geometry (axis-aligned in the panel's local frame).
     panel_center: Vec3,
-    panel_hw: f32,   // half-width  in metres
-    panel_hh: f32,   // half-height in metres
-    // pointer interaction state
-    cursor_pos:    Option<egui::Pos2>,
-    prev_clicking: bool,
-    /// Where the button was first pressed; used to detect drags vs clicks.
-    press_pos:     Option<egui::Pos2>,
+    panel_hw:     f32,
+    panel_hh:     f32,
+
+    // UI state (per-panel).
+    ui_state:  UiState,
+    draw_list: DrawList,
 }
 
 impl PanelRenderer {
-    /// `xr_format` is the format of the XR eye swapchain textures we'll render onto.
-    /// `center` and `width_m`/`height_m` set the panel's world-space position and size.
+    /// `xr_format` is the format the 3-D quad pass writes to (XR swapchain or
+    /// desktop surface).  `center`, `width_m`, `height_m` define the world-
+    /// space placement of the quad.  `pixel_width` × `pixel_height` is the
+    /// resolution of the offscreen UI texture.
     pub fn new(
-        device: &wgpu::Device,
-        xr_format: wgpu::TextureFormat,
-        pixel_width: u32,
+        device:       &wgpu::Device,
+        xr_format:    wgpu::TextureFormat,
+        pixel_width:  u32,
         pixel_height: u32,
-        center: Vec3,
-        width_m: f32,
-        height_m: f32,
+        center:       Vec3,
+        width_m:      f32,
+        height_m:     f32,
     ) -> Self {
-        // ── offscreen texture (Rgba8Unorm — egui renders here) ─────────────
-        let offscreen_fmt = wgpu::TextureFormat::Rgba8Unorm;
+        // ── offscreen texture (UI lands here) ────────────────────────────────
         let offscreen_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("panel_offscreen"),
             size: wgpu::Extent3d { width: pixel_width, height: pixel_height, depth_or_array_layers: 1 },
             mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: offscreen_fmt,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
+            sample_count:    1,
+            dimension:       wgpu::TextureDimension::D2,
+            format:          PANEL_OFFSCREEN_FORMAT,
+            usage:           wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats:    &[],
         });
         let offscreen_view = offscreen_texture.create_view(&Default::default());
 
-        // ── egui ──────────────────────────────────────────────────────────
-        let egui_ctx = egui::Context::default();
-        // VR controllers have natural hand tremor; the default 6px threshold is too
-        // tight and causes clicks to be silently dropped.  200px is generous enough
-        // to survive any realistic controller movement while pressing a button.
-        egui_ctx.options_mut(|o| o.input_options.max_click_dist = 200.0);
-        super::fonts::install_system_fonts(&egui_ctx);
-        let egui_renderer = egui_wgpu::Renderer::new(device, offscreen_fmt, egui_wgpu::RendererOptions::default());
+        // ── 3-D quad pipeline ────────────────────────────────────────────────
+        let shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/panel-quad.wgsl"));
 
-        // ── camera bind group layout ──────────────────────────────────────
-        let shader = device.create_shader_module(
-            wgpu::include_wgsl!("../shaders/panel-quad.wgsl"),
-        );
         let camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("panel_camera_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -122,15 +111,14 @@ impl PanelRenderer {
                 count: None,
             }],
         });
-        let init_cam = CameraUniform {
-            projection: Mat4::IDENTITY.to_cols_array_2d(),
-            view: Mat4::IDENTITY.to_cols_array_2d(),
-        };
-        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("panel_camera_buf"),
-            contents: bytemuck::bytes_of(&init_cam),
+
+        let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("panel_camera_uniform"),
+            size:  std::mem::size_of::<CameraUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
+
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("panel_camera_bg"),
             layout: &camera_bgl,
@@ -140,7 +128,6 @@ impl PanelRenderer {
             }],
         });
 
-        // ── texture bind group layout ─────────────────────────────────────
         let texture_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("panel_texture_bgl"),
             entries: &[
@@ -148,9 +135,9 @@ impl PanelRenderer {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
                     count: None,
                 },
@@ -162,33 +149,29 @@ impl PanelRenderer {
                 },
             ],
         });
+
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("panel_sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+
         let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("panel_texture_bg"),
             layout: &texture_bgl,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&offscreen_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&offscreen_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
             ],
         });
 
-        // ── pipeline (same shader as video quad) ──────────────────────────
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
+            label: Some("panel_pipeline_layout"),
             bind_group_layouts: &[Some(&camera_bgl), Some(&texture_bgl)],
-            immediate_size: 0,
+            immediate_size:     0,
         });
+
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("panel_pipeline"),
             layout: Some(&pipeline_layout),
@@ -207,12 +190,12 @@ impl PanelRenderer {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: xr_format,
-                    // Premultiplied alpha blend so the panel composites over video.
                     blend: Some(wgpu::BlendState {
+                        // Premultiplied-alpha over operator.
                         color: wgpu::BlendComponent {
                             src_factor: wgpu::BlendFactor::One,
                             dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
+                            operation:  wgpu::BlendOperation::Add,
                         },
                         alpha: wgpu::BlendComponent::REPLACE,
                     }),
@@ -220,14 +203,13 @@ impl PanelRenderer {
                 })],
                 compilation_options: Default::default(),
             }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            primitive:      wgpu::PrimitiveState::default(),
+            depth_stencil:  None,
+            multisample:    wgpu::MultisampleState::default(),
             multiview_mask: None,
-            cache: None,
+            cache:          None,
         });
 
-        // ── vertex buffer ─────────────────────────────────────────────────
         let verts = panel_quad(center, width_m, height_m);
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("panel_vbuf"),
@@ -236,11 +218,6 @@ impl PanelRenderer {
         });
 
         Self {
-            egui_ctx,
-            egui_renderer,
-            offscreen_view,
-            pixel_width,
-            pixel_height,
             pipeline,
             camera_buffer,
             camera_bind_group,
@@ -249,287 +226,150 @@ impl PanelRenderer {
             sampler,
             vertex_buffer,
             offscreen_texture,
+            offscreen_view,
+            pixel_width,
+            pixel_height,
             panel_center: center,
-            panel_hw: width_m / 2.0,
-            panel_hh: height_m / 2.0,
-            cursor_pos: None,
-            prev_clicking: false,
-            press_pos: None,
+            panel_hw:     width_m  / 2.0,
+            panel_hh:     height_m / 2.0,
+            ui_state:     UiState::new(),
+            draw_list:    DrawList::new(),
         }
     }
 
-    /// Internal: test a world-space ray against the panel plane.
-    /// Returns `(t, hit_point)` if the ray hits the quad, `None` otherwise.
+    // ── ray hit-testing ───────────────────────────────────────────────────────
+
     fn intersect(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<(f32, Vec3)> {
-        // Panel is in the plane z = panel_center.z, facing +Z toward the viewer.
-        if ray_dir.z.abs() < 1e-6 {
-            return None; // ray parallel to panel
-        }
-        let t = (self.panel_center.z - ray_origin.z) / ray_dir.z;
-        if t <= 0.001 {
-            return None; // panel is behind or at the controller
-        }
-        let hit = ray_origin + ray_dir * t;
-        let dx = hit.x - self.panel_center.x;
-        let dy = hit.y - self.panel_center.y;
-        if dx.abs() > self.panel_hw || dy.abs() > self.panel_hh {
-            return None; // outside the quad
-        }
-        Some((t, hit))
-    }
-
-    /// Like `hit_test` but clamps the result to the panel bounds instead of
-    /// returning `None` when the ray misses.  Used for pointer capture so the
-    /// cursor continues to track along the panel edge during a drag.
-    /// Returns `None` only if the ray is parallel to (or behind) the panel.
-    fn hit_test_clamped(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<egui::Pos2> {
         if ray_dir.z.abs() < 1e-6 { return None; }
         let t = (self.panel_center.z - ray_origin.z) / ray_dir.z;
         if t <= 0.001 { return None; }
         let hit = ray_origin + ray_dir * t;
-        let dx = hit.x - self.panel_center.x;
-        let dy = hit.y - self.panel_center.y;
-        let u = ((dx + self.panel_hw) / (self.panel_hw * 2.0)).clamp(0.0, 1.0);
-        let v = 1.0 - ((dy + self.panel_hh) / (self.panel_hh * 2.0)).clamp(0.0, 1.0);
-        Some(egui::Pos2 {
-            x: u * self.pixel_width  as f32,
-            y: v * self.pixel_height as f32,
-        })
+        let dx  = hit.x - self.panel_center.x;
+        let dy  = hit.y - self.panel_center.y;
+        if dx.abs() > self.panel_hw || dy.abs() > self.panel_hh { return None; }
+        Some((t, hit))
     }
 
-    /// Returns the 3-D world-space hit point on the panel, or `None`.
+    /// Hit-test that clamps the result to the panel bounds when the ray would
+    /// otherwise miss — used while a cursor is held so dragging off the panel
+    /// still updates sliders / scroll thumbs.
+    fn hit_test_clamped(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<(f32, f32)> {
+        if ray_dir.z.abs() < 1e-6 { return None; }
+        let t = (self.panel_center.z - ray_origin.z) / ray_dir.z;
+        if t <= 0.001 { return None; }
+        let hit = ray_origin + ray_dir * t;
+        let dx  = hit.x - self.panel_center.x;
+        let dy  = hit.y - self.panel_center.y;
+        let u   = ((dx + self.panel_hw) / (self.panel_hw * 2.0)).clamp(0.0, 1.0);
+        let v   = 1.0 - ((dy + self.panel_hh) / (self.panel_hh * 2.0)).clamp(0.0, 1.0);
+        Some((u * self.pixel_width as f32, v * self.pixel_height as f32))
+    }
+
+    /// Ray hit point in world space, or `None` when the ray misses the quad.
+    /// Used by the pointer renderer to truncate the beam.
     pub fn hit_test_3d(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<Vec3> {
         self.intersect(ray_origin, ray_dir).map(|(_, p)| p)
     }
 
-    /// Returns the egui pixel coordinate of the intersection, or `None`.
-    pub fn hit_test(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<egui::Pos2> {
+    /// Ray hit point in panel-pixel space, or `None` when the ray misses.
+    pub fn hit_test(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<(f32, f32)> {
         let (_, hit) = self.intersect(ray_origin, ray_dir)?;
         let dx = hit.x - self.panel_center.x;
         let dy = hit.y - self.panel_center.y;
-        let u = (dx + self.panel_hw) / (self.panel_hw * 2.0);
-        let v = 1.0 - (dy + self.panel_hh) / (self.panel_hh * 2.0);
-        Some(egui::Pos2 {
-            x: u * self.pixel_width as f32,
-            y: v * self.pixel_height as f32,
-        })
+        let u  = (dx + self.panel_hw) / (self.panel_hw * 2.0);
+        let v  = 1.0 - (dy + self.panel_hh) / (self.panel_hh * 2.0);
+        Some((u * self.pixel_width as f32, v * self.pixel_height as f32))
     }
 
-    /// Generic update: runs `draw_fn` inside the egui panel, renders the result
-    /// to the offscreen texture, and returns whatever `draw_fn` returns.
-    ///
-    /// `draw_fn(ui, interaction)` — `interaction` is `Some((press_pos, release_pos))`
-    /// on the single frame the controller select button is released.  Both positions
-    /// are egui pixel coordinates from our own hit-test, not from egui's internal
-    /// state.  A widget should activate only if both positions fall within its rect,
-    /// implementing true pointer capture: the widget under the press owns the
-    /// interaction until release.
-    pub fn update_ui<T: Default>(
+    // ── per-frame UI build ────────────────────────────────────────────────────
+
+    /// Run a UI draw closure with two-cursor input and render the resulting
+    /// draw list to the offscreen texture.  Returns whatever the closure
+    /// returns — typically an `…Actions` struct.
+    pub fn update_ui<R>(
         &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        device:      &wgpu::Device,
+        queue:       &wgpu::Queue,
+        assets:      &mut UiAssets,
         controllers: &[Option<ControllerState>; 2],
-        draw_fn: impl FnOnce(&mut egui::Ui, Option<(egui::Pos2, egui::Pos2)>) -> T,
-    ) -> T {
-        // ── Build pointer events from controller hit-tests ─────────────────
-        let mut events: Vec<egui::Event> = Vec::new();
-        let mut new_pos: Option<egui::Pos2> = None;
-        let mut new_clicking = false;
-        let mut thumbstick_y = 0.0_f32;
-
-        for ctrl in controllers.iter().flatten() {
-            if let Some(hit) = self.hit_test(ctrl.ray_origin, ctrl.ray_dir) {
-                new_pos      = Some(hit);
-                new_clicking = ctrl.clicking;
+        draw_fn:     impl FnOnce(&mut Ui) -> R,
+    ) -> R {
+        // Build per-cursor input from each controller.
+        let mut cursors: [CursorInput; 2] = [CursorInput::default(), CursorInput::default()];
+        for i in 0..2 {
+            if let Some(ctrl) = &controllers[i] {
+                // Use the clamped hit-test while the trigger is held so drags
+                // continue to track even when the ray strays off the panel.
+                let pos = if ctrl.clicking {
+                    self.hit_test_clamped(ctrl.ray_origin, ctrl.ray_dir)
+                        .or_else(|| self.hit_test(ctrl.ray_origin, ctrl.ray_dir))
+                } else {
+                    self.hit_test(ctrl.ray_origin, ctrl.ray_dir)
+                };
+                cursors[i] = CursorInput {
+                    pos,
+                    clicking: ctrl.clicking,
+                    scroll_y: -ctrl.thumbstick_y * THUMBSTICK_SCROLL_SPEED,
+                };
             }
-            // Largest-magnitude thumbstick across both controllers drives scroll.
-            if ctrl.thumbstick_y.abs() > thumbstick_y.abs() {
-                thumbstick_y = ctrl.thumbstick_y;
-            }
         }
 
-        // Pointer capture: while the button is held and the ray has left the
-        // panel, project onto the infinite panel plane and clamp to bounds.
-        // This keeps sliders and scrollbars tracking along the edge rather than
-        // freezing at the last known position.
-        if self.prev_clicking && new_pos.is_none() {
-            new_pos = controllers.iter().flatten()
-                .find_map(|c| self.hit_test_clamped(c.ray_origin, c.ray_dir))
-                .or(self.cursor_pos);            // fallback: ray parallel to panel
-            new_clicking = controllers.iter().flatten().any(|c| c.clicking);
-        }
+        // Begin a UI frame.
+        self.draw_list.clear();
+        let mut ui = begin_frame(
+            &mut self.ui_state,
+            &mut self.draw_list,
+            &mut assets.atlas,
+            (self.pixel_width as f32, self.pixel_height as f32),
+            cursors,
+        );
+        ui.paint_background(PANEL_BG);
+        let result = draw_fn(&mut ui);
+        drop(ui);
 
-        // Record where the button first went down; this is the widget that owns
-        // the pointer capture and is the only widget allowed to fire on release.
-        if new_clicking && !self.prev_clicking {
-            self.press_pos = new_pos;
-        }
+        self.draw_list.finish();
 
-        // `interaction`: on the single frame the button is released, `Some((press_pos,
-        // release_pos))` — both in egui pixel space from our own hit-test.  Draw
-        // functions use this to implement true pointer capture: a widget fires if
-        // and only if both positions fall within its rect.
-        let interaction: Option<(egui::Pos2, egui::Pos2)> =
-            if !new_clicking && self.prev_clicking {
-                // `new_pos` is authoritative release position from this frame's hit-test.
-                // Fall back to press_pos if the ray left the panel on the same frame
-                // the button was released (extremely unlikely but safe).
-                self.press_pos.zip(new_pos.or(self.press_pos))
-            } else {
-                None
-            };
+        // Upload any new glyph rasterisations.
+        assets.atlas.flush(queue);
 
-        if !new_clicking {
-            self.press_pos = None;
-        }
-
-        match (self.cursor_pos, new_pos) {
-            (_, Some(pos)) => {
-                events.push(egui::Event::PointerMoved(pos));
-                // Press / release events are still injected so the Slider can drag.
-                if new_clicking && !self.prev_clicking {
-                    events.push(egui::Event::PointerButton {
-                        pos,
-                        button: egui::PointerButton::Primary,
-                        pressed: true,
-                        modifiers: egui::Modifiers::NONE,
-                    });
-                }
-                if !new_clicking && self.prev_clicking {
-                    events.push(egui::Event::PointerButton {
-                        pos,
-                        button: egui::PointerButton::Primary,
-                        pressed: false,
-                        modifiers: egui::Modifiers::NONE,
-                    });
-                }
-                // Thumbstick scroll — only when the pointer is over the panel so
-                // scroll areas know they're being targeted.
-                if thumbstick_y.abs() > 0.05 {
-                    events.push(egui::Event::MouseWheel {
-                        unit:      egui::MouseWheelUnit::Point,
-                        delta:     egui::Vec2::new(0.0, thumbstick_y * THUMBSTICK_SCROLL_SPEED),
-                        phase:     egui::TouchPhase::Move,
-                        modifiers: egui::Modifiers::NONE,
-                    });
-                }
-            }
-            (Some(_), None) => {
-                events.push(egui::Event::PointerGone);
-            }
-            (None, None) => {}
-        }
-
-        self.cursor_pos    = new_pos;
-        self.prev_clicking = new_clicking;
-
-        // ── Run egui ──────────────────────────────────────────────────────
-        let raw_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(self.pixel_width as f32, self.pixel_height as f32),
-            )),
-            events,
-            ..Default::default()
-        };
-
-        let mut result = T::default();
-        // `run_ui` requires FnMut; wrap the FnOnce in an Option so we can `take` it once.
-        let mut draw_fn_opt = Some(draw_fn);
-
-        let full_output = self.egui_ctx.run_ui(raw_input, |ctx| {
-            ctx.set_visuals(egui::Visuals::dark());
-
-            #[allow(deprecated)]
-            egui::CentralPanel::default()
-                .frame(
-                    egui::Frame::new()
-                        .fill(egui::Color32::from_rgba_unmultiplied(15, 15, 15, 220))
-                        .inner_margin(egui::Margin { left: 12, right: 12, top: 6, bottom: 6 }),
-                )
-                .show(ctx, |ui| {
-                    if let Some(f) = draw_fn_opt.take() {
-                        result = f(ui, interaction);
-                    }
-                });
-        });
-
-        let primitives = self
-            .egui_ctx
-            .tessellate(full_output.shapes, full_output.pixels_per_point);
-
-        let screen_desc = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [self.pixel_width, self.pixel_height],
-            pixels_per_point: 1.0,
-        };
-
-        let mut encoder = device.create_command_encoder(&Default::default());
-
-        // Upload any new fonts / images egui wants on the GPU.
-        for (id, delta) in &full_output.textures_delta.set {
-            self.egui_renderer.update_texture(device, queue, *id, delta);
-        }
-        self.egui_renderer.update_buffers(device, queue, &mut encoder, &primitives, &screen_desc);
-
-        // Render egui into the offscreen texture.
-        // `.forget_lifetime()` erases the borrow of `encoder` so egui_wgpu's
-        // `render` method (which requires `RenderPass<'static>`) can accept it.
-        // Safety: we drop the pass before calling `encoder.finish()` below.
-        {
-            let mut pass = encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("egui_offscreen"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.offscreen_view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    ..Default::default()
-                })
-                .forget_lifetime();
-            self.egui_renderer.render(&mut pass, &primitives, &screen_desc);
-        }
-
-        // Free textures egui no longer needs.
-        for id in &full_output.textures_delta.free {
-            self.egui_renderer.free_texture(id);
-        }
-
-        queue.submit([encoder.finish()]);
+        // Render the draw list into the offscreen UI texture.
+        assets.renderer.render(
+            device, queue,
+            &self.offscreen_view,
+            self.pixel_width, self.pixel_height,
+            &self.draw_list,
+            assets.atlas.view(),
+            &assets.icon_view,
+        );
 
         result
     }
 
-    /// Convenience wrapper: run the control-bar draw function.
+    /// Convenience: build the control-bar UI.
     pub fn update(
         &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        state: &ControlBarState,
+        device:      &wgpu::Device,
+        queue:       &wgpu::Queue,
+        assets:      &mut UiAssets,
+        state:       &ControlBarState,
         controllers: &[Option<ControllerState>; 2],
     ) -> ControlBarActions {
-        self.update_ui(device, queue, controllers, |ui, interaction| {
-            draw(ui, state, interaction)
-        })
+        self.update_ui(device, queue, assets, controllers, |ui| draw(ui, state))
     }
 
-    /// Render the panel quad into one XR eye.  Uses `LoadOp::Load` so the video
-    /// rendered before this call is preserved and the panel composites on top.
+    // ── 3-D quad render ───────────────────────────────────────────────────────
+
     pub fn render_eye(
         &self,
-        target: &wgpu::TextureView,
-        projection: Mat4,
-        view: Mat4,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        target:      &wgpu::TextureView,
+        projection:  Mat4,
+        view:        Mat4,
+        device:      &wgpu::Device,
+        queue:       &wgpu::Queue,
     ) {
         let cam = CameraUniform {
             projection: projection.to_cols_array_2d(),
-            view: view.to_cols_array_2d(),
+            view:       view.to_cols_array_2d(),
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&cam));
 
@@ -542,15 +382,14 @@ impl PanelRenderer {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        // Load existing content (video) so we composite on top.
-                        load: wgpu::LoadOp::Load,
+                        load:  wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 ..Default::default()
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_bind_group(0, &self.camera_bind_group,  &[]);
             pass.set_bind_group(1, &self.texture_bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.draw(0..6, 0..1);
