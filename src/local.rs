@@ -98,6 +98,7 @@ impl LocalMode {
         ControllerState {
             ray_origin:   glam::Vec3::ZERO,
             ray_dir:      dir,
+            pose_valid:   true,
             clicking:     self.clicking,
             thumbstick_x: 0.0,
             thumbstick_y: 0.0,

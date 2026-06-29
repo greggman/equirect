@@ -206,6 +206,9 @@ impl PointerRenderer {
 
         for (i, ctrl) in controllers.iter().enumerate() {
             let Some(ctrl) = ctrl else { continue };
+            // Hide the beam when pose tracking has dropped — drawing it from
+            // a zero pose would render a degenerate stub at the origin.
+            if !ctrl.pose_valid { continue; }
             let color = COLORS[i];
 
             // Length of the beam: to the hit surface, or the default free-air length.

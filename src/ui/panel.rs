@@ -298,9 +298,13 @@ impl PanelRenderer {
         let mut cursors: [CursorInput; 2] = [CursorInput::default(), CursorInput::default()];
         for i in 0..2 {
             if let Some(ctrl) = &controllers[i] {
-                // Use the clamped hit-test while the trigger is held so drags
-                // continue to track even when the ray strays off the panel.
-                let pos = if ctrl.clicking {
+                // Only compute a cursor position when the aim pose is being
+                // tracked; otherwise we'd hit-test against a zero ray and
+                // place a phantom cursor at the projected origin.
+                let pos = if !ctrl.pose_valid {
+                    None
+                } else if ctrl.clicking {
+                    // Clamp while held so drags continue when the ray strays off.
                     self.hit_test_clamped(ctrl.ray_origin, ctrl.ray_dir)
                         .or_else(|| self.hit_test(ctrl.ray_origin, ctrl.ray_dir))
                 } else {
@@ -395,6 +399,7 @@ impl PanelRenderer {
             pass.draw(0..6, 0..1);
         }
         queue.submit([encoder.finish()]);
-        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
+        // No CPU wait: GPU sync is handled by the swapchain protocol.
+        let _ = device;
     }
 }

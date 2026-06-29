@@ -74,7 +74,11 @@ pub trait Mode {
     // Each mode chooses where panels appear in the world.  Defaults match the
     // VR placements; LocalMode overrides them so panels stay centred on screen.
 
-    fn control_bar_position(&self) -> glam::Vec3 { glam::Vec3::new(0.0, 0.0, -2.0) }
-    fn browser_position(&self)     -> glam::Vec3 { glam::Vec3::new(0.0, 1.2, -2.0) }
-    fn settings_position(&self)    -> glam::Vec3 { glam::Vec3::new(0.0, 1.2, -2.0) }
+    // y=0 is the stage floor in OpenXR; typical eye height is ~1.6 m.  We
+    // place the control bar just below eye level (1.4) so the user can glance
+    // down at it without craning the neck, and the larger browser/settings
+    // panels slightly higher so their bottom edge sits near control-bar y.
+    fn control_bar_position(&self) -> glam::Vec3 { glam::Vec3::new(0.0, 1.4, -2.0) }
+    fn browser_position(&self)     -> glam::Vec3 { glam::Vec3::new(0.0, 1.6, -2.0) }
+    fn settings_position(&self)    -> glam::Vec3 { glam::Vec3::new(0.0, 1.6, -2.0) }
 }

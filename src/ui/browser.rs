@@ -253,7 +253,9 @@ pub fn draw(ui: &mut Ui, state: &mut BrowserState) -> BrowserActions {
     let is_local           = state.location.as_local().is_some();
 
     // ── header: path label, volumes toggle, close ────────────────────────────
-    ui.horizontal(|ui| {
+    // 44 = tallest child (close button: 28 icon + 12 pad).  horizontal_h
+    // centers the (shorter) path label vertically against the buttons.
+    ui.horizontal_h(44.0, |ui| {
         ui.label_styled(&dir_display, FONT_DEFAULT, TEXT_MUTED);
         ui.horizontal_rtl(|ui| {
             if ui.icon_button(icons::ICON_CLOSE, 28.0, false) {

@@ -61,6 +61,9 @@ pub struct UiState {
     drag:          HashMap<u64, u8>,
     /// Saved scroll offsets, keyed by scroll-area ID.
     scroll_y:      HashMap<u64, f32>,
+    /// Pan-drag (touch-style swipe inside scroll content): per scroll-area ID,
+    /// (cursor, last_y, accumulated_movement).  Used by `scroll_area`.
+    pan_drag:      HashMap<u64, (u8, f32, f32)>,
 }
 
 impl UiState {
@@ -90,6 +93,10 @@ struct LayoutCtx {
     direction: Direction,
     /// Tallest widget so far in the current row (only meaningful for horizontal).
     row_height: f32,
+    /// If set, widgets allocated in this horizontal layout are vertically
+    /// centered inside this height instead of top-aligned.  Nested rows
+    /// inherit the value so mixed-height children (label + button) line up.
+    fixed_h:   Option<f32>,
 }
 
 // ── Ui ────────────────────────────────────────────────────────────────────────
@@ -148,6 +155,7 @@ pub fn begin_frame<'a>(
         cursor_y:   inner.y,
         direction:  Direction::Vertical,
         row_height: 0.0,
+        fixed_h:    None,
     };
 
     Ui {
@@ -180,15 +188,24 @@ impl Ui<'_> {
     /// Reserve a (w × h) rect from the active layout.
     pub fn allocate(&mut self, w: f32, h: f32) -> Rect {
         let l = *self.current();
+        // In horizontal layouts with a fixed row height, vertically center the
+        // widget inside that height — that's how labels and buttons of mixed
+        // intrinsic heights end up sharing a baseline.
+        let y = match (l.direction, l.fixed_h) {
+            (Direction::HorizontalLr | Direction::HorizontalRl, Some(fh)) if h < fh => {
+                l.cursor_y + (fh - h) * 0.5
+            }
+            _ => l.cursor_y,
+        };
         let rect = match l.direction {
             Direction::Vertical => {
                 Rect::new(l.cursor_x, l.cursor_y, w.min(l.rect.w), h)
             }
             Direction::HorizontalLr => {
-                Rect::new(l.cursor_x, l.cursor_y, w, h)
+                Rect::new(l.cursor_x, y, w, h)
             }
             Direction::HorizontalRl => {
-                Rect::new(l.cursor_x - w, l.cursor_y, w, h)
+                Rect::new(l.cursor_x - w, y, w, h)
             }
         };
         let m = self.current_mut();
@@ -242,15 +259,23 @@ impl Ui<'_> {
     /// Run `content` inside a horizontal LTR row.  When the closure returns,
     /// the parent layout advances by the row's tallest widget height.
     pub fn horizontal<R>(&mut self, content: impl FnOnce(&mut Ui) -> R) -> R {
-        self.row(Direction::HorizontalLr, content)
+        self.row(Direction::HorizontalLr, None, content)
     }
 
     /// Same as `horizontal`, but widgets are placed from the right edge inward.
     pub fn horizontal_rtl<R>(&mut self, content: impl FnOnce(&mut Ui) -> R) -> R {
-        self.row(Direction::HorizontalRl, content)
+        self.row(Direction::HorizontalRl, None, content)
     }
 
-    fn row<R>(&mut self, dir: Direction, content: impl FnOnce(&mut Ui) -> R) -> R {
+    /// Like `horizontal`, but with a fixed row height — every widget inside
+    /// (and inside any nested RTL section) is vertically centered within
+    /// `row_h`.  Use this when mixing widgets of different intrinsic heights
+    /// (e.g. labels and buttons) and you want their visual centers to line up.
+    pub fn horizontal_h<R>(&mut self, row_h: f32, content: impl FnOnce(&mut Ui) -> R) -> R {
+        self.row(Direction::HorizontalLr, Some(row_h), content)
+    }
+
+    fn row<R>(&mut self, dir: Direction, fixed_h: Option<f32>, content: impl FnOnce(&mut Ui) -> R) -> R {
         let parent = *self.current();
         // Compute the row bounds based on the parent's direction so nested
         // rows can split the parent's remaining horizontal space.
@@ -260,6 +285,8 @@ impl Ui<'_> {
             Direction::HorizontalRl  => (parent.rect.x,  parent.cursor_y, (parent.cursor_x - parent.rect.x).max(0.0)),
         };
         let row_h = (parent.rect.bottom() - row_top).max(0.0);
+        // Inherit fixed_h from the parent if the caller didn't supply one.
+        let effective_fixed_h = fixed_h.or(parent.fixed_h);
 
         let layout = LayoutCtx {
             rect:       Rect::new(row_left, row_top, row_w, row_h),
@@ -267,7 +294,8 @@ impl Ui<'_> {
             cursor_x:   if dir == Direction::HorizontalRl { row_left + row_w } else { row_left },
             cursor_y:   row_top,
             direction:  dir,
-            row_height: 0.0,
+            row_height: effective_fixed_h.unwrap_or(0.0),
+            fixed_h:    effective_fixed_h,
         };
         self.layouts.push(layout);
         let result = content(self);
@@ -487,13 +515,18 @@ impl Ui<'_> {
 
     pub fn slider_sized(&mut self, width: f32, value: &mut f32, min: f32, max: f32) -> bool {
         let id     = self.next_id();
-        let h      = 22.0;
-        let rect   = self.allocate(width, h);
-        let track  = rect.shrink(0.0, 8.0);
+        // The full row is the hit area; the track is the painted bar inside it.
+        // Both are deliberately tall: in VR a 22 px bar was too thin to grab.
+        let h         = 48.0;
+        let track_h   = 18.0;
+        let rect      = self.allocate(width, h);
+        let track_y   = rect.y + (rect.h - track_h) * 0.5;
+        let track     = Rect::new(rect.x, track_y, rect.w, track_h);
 
         let mut changed = false;
 
-        // Drag handling
+        // Drag handling — note we check the full `rect` (not just `track`) so
+        // a press anywhere over the slider snaps and starts a drag.
         let dragging_cursor = self.state.drag.get(&id).copied();
         let active_cursor   = if let Some(c) = dragging_cursor {
             if self.cursors[c as usize].clicking {
@@ -503,12 +536,11 @@ impl Ui<'_> {
                 None
             }
         } else {
-            // Look for a press that started on this frame inside the track.
             let mut found = None;
             for i in 0..2 {
                 if self.cursors[i].clicking {
                     if let Some(p) = self.state.press_pos[i] {
-                        if track.contains(p.0, p.1) && self.enabled {
+                        if rect.contains(p.0, p.1) && self.enabled {
                             found = Some(i);
                             break;
                         }
@@ -523,8 +555,8 @@ impl Ui<'_> {
 
         if let Some(i) = active_cursor {
             if let Some((cx, _cy)) = self.cursors[i].pos {
-                let frac     = ((cx - track.x) / track.w.max(1.0)).clamp(0.0, 1.0);
-                let new_val  = min + frac * (max - min);
+                let frac    = ((cx - track.x) / track.w.max(1.0)).clamp(0.0, 1.0);
+                let new_val = min + frac * (max - min);
                 if (new_val - *value).abs() > 1e-6 {
                     *value  = new_val;
                     changed = true;
@@ -537,10 +569,11 @@ impl Ui<'_> {
         self.draw.rect(track, SLIDER_TRACK);
         let fill_w = track.w * frac;
         self.draw.rect(Rect::new(track.x, track.y, fill_w, track.h), SLIDER_FILL);
-        let thumb_w = 10.0;
+        let thumb_w = 14.0;
+        let thumb_h = h - 4.0;
         let thumb_x = track.x + track.w * frac - thumb_w * 0.5;
         let thumb_y = rect.y + 2.0;
-        self.draw.rect(Rect::new(thumb_x, thumb_y, thumb_w, rect.h - 4.0), SLIDER_THUMB);
+        self.draw.rect(Rect::new(thumb_x, thumb_y, thumb_w, thumb_h), SLIDER_THUMB);
 
         changed
     }
@@ -551,8 +584,10 @@ impl Ui<'_> {
     /// across frames.
     pub fn scroll_area<R>(&mut self, id: u64, height: f32, content: impl FnOnce(&mut Ui) -> R) -> R {
         let viewport = self.allocate(self.available_width(), height);
-        let scrollbar_w = 12.0;
-        let inner_rect  = Rect::new(viewport.x, viewport.y, viewport.w - scrollbar_w - 4.0, viewport.h);
+        // Wide enough to grab in VR — the scrollbar is the closest thing to a
+        // vertical slider and benefits from the same generous hit area.
+        let scrollbar_w = 24.0;
+        let inner_rect  = Rect::new(viewport.x, viewport.y, viewport.w - scrollbar_w - 6.0, viewport.h);
 
         let mut offset = self.state.scroll_y.get(&id).copied().unwrap_or(0.0);
 
@@ -567,6 +602,43 @@ impl Ui<'_> {
             }
         }
 
+        // ── pan-drag: press inside content and drag to scroll ────────────────
+        // If accumulated movement exceeds the threshold, the cursor's press_pos
+        // is cleared so the release won't activate any row underneath.
+        const PAN_THRESHOLD: f32 = 24.0;
+        if let Some((cursor, last_y, accum)) = self.state.pan_drag.get(&id).copied() {
+            if self.cursors[cursor as usize].clicking {
+                if let Some((_, y)) = self.cursors[cursor as usize].pos {
+                    let delta = y - last_y;
+                    if delta != 0.0 {
+                        offset -= delta;
+                    }
+                    let new_accum = accum + delta.abs();
+                    if new_accum > PAN_THRESHOLD {
+                        self.state.press_pos[cursor as usize] = None;
+                    }
+                    self.state.pan_drag.insert(id, (cursor, y, new_accum));
+                }
+            } else {
+                self.state.pan_drag.remove(&id);
+            }
+        } else {
+            // No pan in progress — look for a press that just landed inside the
+            // content area (excluding the scrollbar).
+            for i in 0..2 {
+                if self.cursors[i].clicking {
+                    if let Some(p) = self.state.press_pos[i] {
+                        if inner_rect.contains(p.0, p.1) {
+                            if let Some((_, y)) = self.cursors[i].pos {
+                                self.state.pan_drag.insert(id, (i as u8, y, 0.0));
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         // Push a clipped vertical layout shifted by -offset.
         self.draw.push_clip(inner_rect);
         let layout = LayoutCtx {
@@ -576,6 +648,7 @@ impl Ui<'_> {
             cursor_y:  inner_rect.y - offset,
             direction: Direction::Vertical,
             row_height: 0.0,
+            fixed_h:   None,
         };
         self.layouts.push(layout);
         let result = content(self);
@@ -594,9 +667,9 @@ impl Ui<'_> {
         let bar_rect    = Rect::new(viewport.right() - scrollbar_w, viewport.y, scrollbar_w, viewport.h);
         self.draw.rect(bar_rect, Color::rgba(0.10, 0.10, 0.10, 0.6));
         if content_h > viewport.h {
-            let thumb_h = (viewport.h * viewport.h / content_h).max(20.0);
+            let thumb_h = (viewport.h * viewport.h / content_h).max(28.0);
             let thumb_y = bar_rect.y + (bar_rect.h - thumb_h) * (offset / max_off.max(1.0));
-            let thumb_rect = Rect::new(bar_rect.x + 2.0, thumb_y, bar_rect.w - 4.0, thumb_h);
+            let thumb_rect = Rect::new(bar_rect.x + 3.0, thumb_y, bar_rect.w - 6.0, thumb_h);
             self.draw.rect(thumb_rect, Color::rgba(0.55, 0.55, 0.55, 0.9));
 
             // Drag the thumb.

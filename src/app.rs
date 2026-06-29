@@ -361,11 +361,22 @@ impl ApplicationHandler for App {
         let cb_pos      = mode.as_ref().map(|m| m.control_bar_position()).unwrap_or(glam::Vec3::new(0.0, 0.0, -2.0));
         let browser_pos = mode.as_ref().map(|m| m.browser_position()).unwrap_or(glam::Vec3::new(0.0, 1.2, -2.0));
 
+        // Size the control bar texture to fit its content exactly — no slack
+        // around the icon row, no empty space below the slider.  The constants
+        // come from control_bar.rs so changing the icon count or row heights
+        // there automatically resizes the panel.
+        use crate::ui::control_bar::{CONTROL_BAR_CONTENT_H, CONTROL_BAR_CONTENT_W};
+        use crate::ui::ui::PADDING as UI_PADDING;
+        let cb_pixel_w = (CONTROL_BAR_CONTENT_W + UI_PADDING * 2.0).ceil() as u32;
+        let cb_pixel_h = (CONTROL_BAR_CONTENT_H + UI_PADDING * 2.0).ceil() as u32;
+        let cb_world_w = 1.6_f32;
+        let cb_world_h = cb_world_w * cb_pixel_h as f32 / cb_pixel_w as f32;
+
         self.panel_renderer = Some(PanelRenderer::new(
             &renderer.device, target_fmt,
-            720, 160,
+            cb_pixel_w, cb_pixel_h,
             cb_pos,
-            1.8, 0.4,
+            cb_world_w, cb_world_h,
         ));
 
         self.pointer_renderer = Some(PointerRenderer::new(&renderer.device, target_fmt));

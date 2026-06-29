@@ -1,7 +1,7 @@
 use super::draw_list::Color;
 use super::icons;
 use super::ui::{
-    FONT_DEFAULT, FONT_TINY, TEXT, TEXT_MUTED, Ui,
+    FONT_DEFAULT, FONT_TINY, ITEM_SPACING_X, TEXT, TEXT_MUTED, Ui,
 };
 
 /// Persistent state for the control bar panel.
@@ -55,14 +55,31 @@ pub struct ControlBarActions {
     pub menu_toggle: bool,
 }
 
-const ICON_SIZE: f32 = 64.0;
-const RED:   Color = Color { r: 1.0, g: 0.30, b: 0.30, a: 1.0 };
+pub const ICON_SIZE:    f32 = 56.0;
+/// Total width of one icon button: icon size + horizontal padding from
+/// `ui.rs::icon_button` (8 px each side).
+pub const ICON_BTN_W:   f32 = ICON_SIZE + 16.0;
+/// Number of icon buttons in the row (matches the calls in `draw`).
+pub const ICON_COUNT:   usize = 8;
+const RED:              Color = Color { r: 1.0, g: 0.30, b: 0.30, a: 1.0 };
+
+/// Exact panel-content dimensions implied by the icon row + label/slider rows.
+/// Exposed so `app.rs` can size the panel texture and world quad to match.
+pub const CONTROL_BAR_CONTENT_W: f32 =
+    ICON_COUNT as f32 * ICON_BTN_W + (ICON_COUNT as f32 - 1.0) * ITEM_SPACING_X;
+/// Icon row (56 + 6+6 pad_y) + spacing + title row (32) + spacing + slider row (48).
+pub const CONTROL_BAR_CONTENT_H: f32 = (ICON_SIZE + 12.0) + 6.0 + 32.0 + 6.0 + 48.0;
 
 pub fn draw(ui: &mut Ui, state: &ControlBarState) -> ControlBarActions {
     let mut actions = ControlBarActions::default();
 
-    // ── icon row ──────────────────────────────────────────────────────────
+    // ── icon row (no inter-button gap to match toolbar look) ──────────────
     ui.horizontal(|ui| {
+        // The panel content area is sized to exactly fit this row, so any
+        // residual slack from rounding is harmless — distribute it evenly.
+        let slack = (ui.available_width() - CONTROL_BAR_CONTENT_W).max(0.0);
+        ui.add_space(slack * 0.5);
+
         if ui.icon_button(icons::ICON_PREV, ICON_SIZE, false) { actions.prev = true; }
 
         let play_sprite = if state.is_playing { icons::ICON_PAUSE } else { icons::ICON_PLAY };
@@ -92,8 +109,8 @@ pub fn draw(ui: &mut Ui, state: &ControlBarState) -> ControlBarActions {
         if ui.icon_button(icons::ICON_EXIT,     ICON_SIZE, false) { actions.exit          = true; }
     });
 
-    // ── video name / error  +  app version ────────────────────────────────
-    ui.horizontal(|ui| {
+    // ── video name / error  +  app version (centered together) ────────────
+    ui.horizontal_h(32.0, |ui| {
         if let Some(err) = &state.error {
             ui.label_styled(err, FONT_DEFAULT, RED);
         } else {
@@ -107,7 +124,7 @@ pub fn draw(ui: &mut Ui, state: &ControlBarState) -> ControlBarActions {
         });
     });
 
-    // ── seek scrubber + time (same row) ───────────────────────────────────
+    // ── seek scrubber + time (centered together at slider height) ─────────
     let time_label = format!(
         "{} / {}",
         fmt_time(state.current_secs),
@@ -118,15 +135,22 @@ pub fn draw(ui: &mut Ui, state: &ControlBarState) -> ControlBarActions {
         (state.current_secs / state.duration_secs).clamp(0.0, 1.0) as f32
     } else { 0.0 };
 
-    ui.horizontal(|ui| {
-        // Reserve the right-side label width up front so the slider can use
-        // the rest of the row.
-        let time_w   = ui.measure_text(&time_label, FONT_DEFAULT) + 12.0;
-        let slider_w = (ui.available_width() - time_w - 8.0).max(50.0);
+    // 48 = slider height — putting the row at that height vertically centers
+    // the (shorter) time label with the (taller) slider.
+    ui.horizontal_h(48.0, |ui| {
+        // Reserve exactly the time label's pixel width on the right edge,
+        // then let the slider take everything to the left of it.
+        let time_w   = ui.measure_text(&time_label, FONT_DEFAULT);
+        let gap      = 12.0;
+        let slider_w = (ui.available_width() - time_w - gap).max(50.0);
         if ui.slider_sized(slider_w, &mut frac, 0.0, 1.0) {
             actions.seek_frac = Some(frac);
         }
-        ui.label_styled(&time_label, FONT_DEFAULT, TEXT);
+        // horizontal_rtl takes the remaining row width and pins its contents
+        // to the right edge, so the time label always sits flush right.
+        ui.horizontal_rtl(|ui| {
+            ui.label_styled(&time_label, FONT_DEFAULT, TEXT);
+        });
     });
 
     actions

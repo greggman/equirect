@@ -4,10 +4,14 @@ use crate::vprintln;
 /// Snapshot of one controller for a single frame.
 #[derive(Clone, Copy)]
 pub struct ControllerState {
-    /// World-space origin of the aim ray.
+    /// World-space origin of the aim ray.  Meaningful only when `pose_valid`.
     pub ray_origin: glam::Vec3,
-    /// World-space unit direction of the aim ray.
+    /// World-space unit direction of the aim ray.  Meaningful only when `pose_valid`.
     pub ray_dir: glam::Vec3,
+    /// True if the aim pose was tracked this frame.  Quest controllers drop
+    /// pose tracking when held still for a few seconds; buttons keep working
+    /// independently, so we still report them even when this is `false`.
+    pub pose_valid: bool,
     /// True while the primary trigger is held.
     pub clicking: bool,
     /// Thumbstick X axis (-1 = left, +1 = right).
@@ -171,39 +175,21 @@ impl XrInput {
 
         let mut out = [None, None];
         for (i, &hand_path) in self.hand_paths.iter().enumerate() {
-            // Locate the aim space in stage coordinates.
-            let loc = match self.aim_spaces[i].locate(stage, time) {
-                Ok(l) => l,
-                Err(_) => continue,
-            };
-
-            let flags = loc.location_flags;
-            if !flags.contains(xr::SpaceLocationFlags::POSITION_VALID)
-                || !flags.contains(xr::SpaceLocationFlags::ORIENTATION_VALID)
-            {
-                continue;
-            }
-
-            let p = loc.pose.position;
-            let o = loc.pose.orientation;
-            let pos = glam::Vec3::new(p.x, p.y, p.z);
-            let rot = glam::Quat::from_xyzw(o.x, o.y, o.z, o.w);
-            // Aim direction is -Z in the controller's local frame.
-            let ray_dir = rot * glam::Vec3::NEG_Z;
-
+            // Poll buttons unconditionally — they remain reportable even when
+            // pose tracking has lapsed.  If we returned `None` here based on
+            // pose validity (as we used to), users would see B/Y stop working
+            // after holding the controllers still for a few seconds.
             let clicking = self
                 .click_action
                 .state(session, hand_path)
                 .map(|s| s.current_state && s.is_active)
                 .unwrap_or(false);
 
-            let thumbstick_xy = self
+            let (thumbstick_x, thumbstick_y) = self
                 .thumbstick_action
                 .state(session, hand_path)
                 .map(|s| if s.is_active { (s.current_state.x, s.current_state.y) } else { (0.0, 0.0) })
                 .unwrap_or((0.0, 0.0));
-            let thumbstick_x = thumbstick_xy.0;
-            let thumbstick_y = thumbstick_xy.1;
 
             let menu_pressed = self
                 .menu_action
@@ -217,7 +203,29 @@ impl XrInput {
                 .map(|s| s.current_state && s.is_active)
                 .unwrap_or(false);
 
-            out[i] = Some(ControllerState { ray_origin: pos, ray_dir, clicking, thumbstick_x, thumbstick_y, menu_pressed, grip_pressed });
+            // Locate the aim pose; mark invalid if the runtime can't track it.
+            let (ray_origin, ray_dir, pose_valid) = match self.aim_spaces[i].locate(stage, time) {
+                Ok(loc) => {
+                    let flags = loc.location_flags;
+                    if flags.contains(xr::SpaceLocationFlags::POSITION_VALID)
+                        && flags.contains(xr::SpaceLocationFlags::ORIENTATION_VALID)
+                    {
+                        let p = loc.pose.position;
+                        let o = loc.pose.orientation;
+                        let pos = glam::Vec3::new(p.x, p.y, p.z);
+                        let rot = glam::Quat::from_xyzw(o.x, o.y, o.z, o.w);
+                        (pos, rot * glam::Vec3::NEG_Z, true)
+                    } else {
+                        (glam::Vec3::ZERO, glam::Vec3::ZERO, false)
+                    }
+                }
+                Err(_) => (glam::Vec3::ZERO, glam::Vec3::ZERO, false),
+            };
+
+            out[i] = Some(ControllerState {
+                ray_origin, ray_dir, pose_valid,
+                clicking, thumbstick_x, thumbstick_y, menu_pressed, grip_pressed,
+            });
         }
         out
     }

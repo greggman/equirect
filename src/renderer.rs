@@ -340,7 +340,7 @@ impl Renderer {
             });
         }
         self.queue.submit(std::iter::once(encoder.finish()));
-        self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
+        // Sync is handled by the XR swapchain protocol — don't block the CPU here.
     }
 
     pub fn surface_format(&self) -> wgpu::TextureFormat {

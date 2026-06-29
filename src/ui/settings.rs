@@ -62,7 +62,7 @@ pub fn draw(ui: &mut Ui, state: &mut VideoSettings) -> SettingsActions {
     let stereo_enabled = matches!(state.mode, VideoMode::Sbs3D | VideoMode::View180 | VideoMode::View360);
 
     // ── header (title left, close right) ─────────────────────────────────────
-    ui.horizontal(|ui| {
+    ui.horizontal_h(44.0, |ui| {
         ui.label_styled("Settings", FONT_DEFAULT + 2.0, TEXT);
         ui.horizontal_rtl(|ui| {
             if ui.icon_button(icons::ICON_CLOSE, 28.0, false) {
@@ -146,12 +146,11 @@ pub fn draw(ui: &mut Ui, state: &mut VideoSettings) -> SettingsActions {
 
     // ── 4. Zoom ───────────────────────────────────────────────────────────────
     section_label(ui, "Zoom", true);
-    ui.horizontal(|ui| {
+    ui.horizontal_h(48.0, |ui| {
         if ui.button("1×") && (state.zoom - 1.0).abs() > 0.001 {
             state.zoom = 1.0;
             actions.changed = true;
         }
-        // Reserve space for the zoom value label on the right.
         let zoom_label = format!("{:.2}×", state.zoom);
         let label_w    = ui.measure_text(&zoom_label, FONT_DEFAULT) + 12.0;
         let slider_w   = (ui.available_width() - label_w - 8.0).max(50.0);

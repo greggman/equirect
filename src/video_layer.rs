@@ -207,7 +207,10 @@ impl VideoBlit {
             pass.draw(0..3, 0..1);
         }
         queue.submit([enc.finish()]);
-        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
+        // No CPU wait: the XR swapchain release_image / wait_image protocol
+        // synchronises GPU access to the swapchain image.  Blocking here
+        // serialised the 8K blit with frame production and killed pipelining.
+        let _ = device;
     }
 }
 
