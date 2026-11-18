@@ -380,6 +380,16 @@ impl VrContext {
             .map_err(|e| eprintln!("XR: graphics_requirements failed: {e}"))
             .ok()?;
 
+        // XR_KHR_vulkan_enable also requires xrGetVulkanGraphicsDeviceKHR before
+        // xrCreateSession. SteamVR rejects the session with XR_ERROR_VALIDATION_FAILURE
+        // ("failed to call xrGetVulkanGraphicsDevice before xrCreateSession") without it.
+        let xr_physical = unsafe { xr_instance.vulkan_graphics_device(system, vk_instance) }
+            .map_err(|e| eprintln!("XR: vulkan_graphics_device failed: {e}"))
+            .ok()?;
+        if xr_physical != vk_physical {
+            eprintln!("XR: warning: the runtime wants a different GPU than the one in use");
+        }
+
         // ── create XR session ────────────────────────────────────────────────
         let (session, frame_waiter, frame_stream) = unsafe {
             xr_instance
